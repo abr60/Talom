@@ -22,3 +22,6 @@ __pycache__/
 *.jks
 keystore.properties
 *.keystore.password
+
+docs/
+references/
