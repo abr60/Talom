@@ -49,37 +49,6 @@ JAVA_HOME=/usr/lib/jvm/java-17-openjdk \
 
 The debug APK lands at `app/build/outputs/apk/debug/app-debug.apk`.
 
-### Release build (signed)
-
-This repo ships with the signing config in `app/build.gradle.kts`. The
-keystore and its password are **not** in the repo (see `.gitignore`). To
-produce a signed release APK:
-
-1. Generate a keystore:
-
-   ```bash
-   keytool -genkeypair -keystore app/talom-release.keystore \
-     -alias talom -keyalg RSA -keysize 2048 -validity 10000 \
-     -dname "CN=Talom, OU=Talom, O=Talom, L=, ST=, C=US"
-   ```
-
-2. Put the store + key password in `~/.gradle/gradle.properties`:
-
-   ```properties
-   TALOM_RELEASE_STORE_PASSWORD=...
-   TALOM_RELEASE_KEY_PASSWORD=...
-   TALOM_RELEASE_KEY_ALIAS=talom
-   ```
-
-3. Build:
-
-   ```bash
-   JAVA_HOME=/usr/lib/jvm/java-17-openjdk \
-     ./gradlew :app:assembleRelease
-   ```
-
-   Output: `app/build/outputs/apk/release/app-release.apk`
-
 ## Project layout
 
 ```
