@@ -1,0 +1,18 @@
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+.talom-private/
+*.db
+*.db-wal
+*.db-shm
+*.crypt14
+*.crypt15
+key
+
+# Build / IDE
+app/build/
+.kotlin/
+__pycache__/
+*.pyc
