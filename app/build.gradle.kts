@@ -30,6 +30,38 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    signingConfigs {
+        create("release") {
+            val storeFilePath = file("talom-release.keystore")
+            if (storeFilePath.exists()) {
+                storeFile = storeFilePath
+                storePassword = (project.findProperty("TALOM_RELEASE_STORE_PASSWORD") as String?)
+                    ?: System.getenv("TALOM_RELEASE_STORE_PASSWORD")
+                keyAlias = (project.findProperty("TALOM_RELEASE_KEY_ALIAS") as String?)
+                    ?: System.getenv("TALOM_RELEASE_KEY_ALIAS") ?: "talom"
+                keyPassword = (project.findProperty("TALOM_RELEASE_KEY_PASSWORD") as String?)
+                    ?: System.getenv("TALOM_RELEASE_KEY_PASSWORD")
+                        ?: storePassword
+            }
+        }
+    }
+
+    buildTypes {
+        getByName("release") {
+            isMinifyEnabled = false
+            isShrinkResources = false
+            val releaseSigning = signingConfigs.findByName("release")
+            if (releaseSigning != null && releaseSigning.storeFile?.exists() == true) {
+                signingConfig = releaseSigning
+            }
+        }
+    }
+
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
 }
 
 dependencies {

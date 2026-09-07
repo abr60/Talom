@@ -16,3 +16,9 @@ app/build/
 .kotlin/
 __pycache__/
 *.pyc
+
+# Release signing — never commit the keystore or its password
+*.keystore
+*.jks
+keystore.properties
+*.keystore.password

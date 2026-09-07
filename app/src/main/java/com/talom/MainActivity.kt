@@ -204,7 +204,7 @@ private fun TalomApp(
     var cloudConsent by remember { mutableStateOf(aiPreferences.cloudConsent()) }
     var localConsent by remember { mutableStateOf(aiPreferences.localConsent()) }
     var aiEndpoint by remember {
-        mutableStateOf(aiPreferences.config().endpoint ?: "http://192.168.0.111:11434")
+        mutableStateOf(aiPreferences.config().endpoint ?: "http://localhost:11434")
     }
     var useOpenAiCompatible by remember {
         mutableStateOf(aiPreferences.config().providerId == "openai_compatible")
