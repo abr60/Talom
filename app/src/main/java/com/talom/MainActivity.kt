@@ -9,12 +9,9 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.windowInsetsTopHeight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
@@ -494,28 +491,30 @@ private fun TalomApp(
                 }
             },
         ) { innerPadding ->
-            androidx.compose.foundation.layout.Box(
+            Surface(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.background),
+                    .padding(innerPadding),
+                color = MaterialTheme.colorScheme.background,
             ) {
-                androidx.compose.foundation.layout.Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .windowInsetsTopHeight(WindowInsets.statusBars)
-                        .background(MaterialTheme.colorScheme.background),
-                )
-                Surface(
+                androidx.compose.foundation.layout.Column(
                     modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background,
                 ) {
-                    androidx.compose.foundation.layout.Column(
+                    // Scrollable content bounded between fixed top (status bar via innerPadding)
+                    // and fixed bottom NavigationBar (Scaffold bottomBar). Content is clipped
+                    // to its bounds so scrolled items pass cleanly underneath fixed elements.
+                    androidx.compose.foundation.layout.Box(
                         modifier = Modifier
-                            .fillMaxSize()
-                            .verticalScroll(rememberScrollState())
-                            .padding(innerPadding)
-                            .padding(horizontal = 20.dp, vertical = 16.dp),
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.background),
                     ) {
+                        androidx.compose.foundation.layout.Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
+                                .padding(horizontal = 20.dp, vertical = 16.dp),
+                        ) {
                     when (selectedTab) {
                         0 -> AcademicScreen(
                             academicItems = academicItems,
@@ -776,6 +775,7 @@ private fun TalomApp(
                                 tabReselected = settingsTabReselected,
                                 onTabReselectHandled = { settingsTabReselected = false },
                             )
+    }
     }
     }
     }

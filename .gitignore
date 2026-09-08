@@ -3,7 +3,11 @@ build/
 local.properties
 *.iml
 .idea/
+.vscode/
 .talom-private/
+.env
+*.log
+.DS_Store
 *.db
 *.db-wal
 *.db-shm
@@ -25,3 +29,6 @@ keystore.properties
 
 docs/
 references/
+contracts/
+spikes/
+agents/skills/talom/SKILL.md.bak
