@@ -42,8 +42,10 @@ fun AiSettingsScreen(
     onAiModeChange: (AiMode) -> Unit,
     aiKey: String,
     onAiKeyChange: (String) -> Unit,
-    aiModel: String,
-    onAiModelChange: (String) -> Unit,
+    openAiModel: String,
+    onOpenAiModelChange: (String) -> Unit,
+    ollamaModel: String,
+    onOllamaModelChange: (String) -> Unit,
     ollamaEndpoint: String,
     onOllamaEndpointChange: (String) -> Unit,
     openAiEndpoint: String,
@@ -97,8 +99,8 @@ fun AiSettingsScreen(
                 AiMode.CLOUD -> CloudSection(
                     aiKey = aiKey,
                     onAiKeyChange = onAiKeyChange,
-                    aiModel = aiModel,
-                    onAiModelChange = onAiModelChange,
+                    aiModel = openAiModel,
+                    onAiModelChange = onOpenAiModelChange,
                     openAiEndpoint = openAiEndpoint,
                     onOpenAiEndpointChange = onOpenAiEndpointChange,
                     useOpenAiCompatible = useOpenAiCompatible,
@@ -118,7 +120,7 @@ fun AiSettingsScreen(
                 AiMode.LOCAL -> {
                     Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp)) {
                         OutlinedTextField(value = ollamaEndpoint, onValueChange = onOllamaEndpointChange, label = { Text("Ollama endpoint") }, singleLine = true, modifier = Modifier.fillMaxWidth(), colors = fieldColors)
-                        AiModelDropdown(value = aiModel, onValueChange = onAiModelChange, models = availableLocalModels, loading = localModelsLoading, error = localModelsError, label = "Local model", fieldColors = fieldColors, emptyHint = "Enter endpoint to list models.")
+                        AiModelDropdown(value = ollamaModel, onValueChange = onOllamaModelChange, models = availableLocalModels, loading = localModelsLoading, error = localModelsError, label = "Local model", fieldColors = fieldColors, emptyHint = "Enter endpoint to list models.")
                     }
                     HorizontalDivider(modifier = Modifier.padding(horizontal = 20.dp), color = MaterialTheme.colorScheme.outline)
                     ToggleRow(label = "Allow local network", caption = "Message text goes over local network to Ollama.", checked = localConsent, onCheckedChange = onLocalConsentChange, showDivider = true)

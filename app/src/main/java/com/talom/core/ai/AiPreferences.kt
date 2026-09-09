@@ -16,7 +16,11 @@ class AiPreferences(context: Context) {
     companion object {
         const val KEY_OLLAMA_ENDPOINT = "ollama_endpoint"
         const val KEY_OPENAI_ENDPOINT = "openai_endpoint"
+        const val KEY_OLLAMA_MODEL = "ollama_model"
+        const val KEY_OPENAI_MODEL = "openai_model"
         const val DEFAULT_OPENAI_ENDPOINT = "https://openrouter.ai/api/v1"
+        const val DEFAULT_OPENAI_MODEL = "google/gemma-3-4b-it:free"
+        const val DEFAULT_OLLAMA_MODEL = "qwen3:8b"
     }
 
     fun ollamaEndpoint(): String {
@@ -48,6 +52,44 @@ class AiPreferences(context: Context) {
         return DEFAULT_OPENAI_ENDPOINT
     }
 
+    fun ollamaModel(): String {
+        preferences.getString(KEY_OLLAMA_MODEL, null)?.takeIf { it.isNotBlank() }?.let { return it }
+        // Migrate from legacy single model_id
+        val legacy = preferences.getString("model_id", null)?.trim()
+        if (!legacy.isNullOrBlank()) {
+            val isOpenAiStyle = legacy.contains("/") // e.g. google/gemma-3-4b-it:free
+            if (!isOpenAiStyle) {
+                return legacy
+            }
+        }
+        return DEFAULT_OLLAMA_MODEL
+    }
+
+    fun openAiModel(): String {
+        preferences.getString(KEY_OPENAI_MODEL, null)?.takeIf { it.isNotBlank() }?.let { return it }
+        val legacy = preferences.getString("model_id", null)?.trim()
+        if (!legacy.isNullOrBlank()) {
+            val isOpenAiStyle = legacy.contains("/") || legacy == "gemini-3.6-flash" || legacy.startsWith("gemini-")
+            if (isOpenAiStyle) {
+                // Swap Ollama-style legacy that leaked into openai slot
+                if (legacy.contains(":") && !legacy.contains("/")) return DEFAULT_OPENAI_MODEL
+                return legacy.replace("gemini-2.5-flash", "gemini-3.6-flash")
+            }
+        }
+        return DEFAULT_OPENAI_MODEL
+    }
+
+    fun geminiModel(): String {
+        // Gemini uses openai_model slot when provider is gemini, but keep separate fallback
+        val legacy = preferences.getString("model_id", null)?.trim()
+        if (!legacy.isNullOrBlank() && (legacy.startsWith("gemini-") || legacy.contains("/"))) {
+            return legacy.replace("gemini-2.5-flash", "gemini-3.6-flash")
+        }
+        val openAi = preferences.getString(KEY_OPENAI_MODEL, null)?.trim()
+        if (!openAi.isNullOrBlank() && openAi.startsWith("gemini-")) return openAi
+        return "gemini-3.6-flash"
+    }
+
     fun config(): AiProviderConfig {
         val mode = runCatching { AiMode.valueOf(preferences.getString("mode", AiMode.LOCAL.name)!!) }
             .getOrDefault(AiMode.LOCAL)
@@ -60,16 +102,12 @@ class AiPreferences(context: Context) {
                 if (mode == AiMode.LOCAL) ollamaEndpoint() else null
             }
         }
-        val rawModel = preferences.getString("model_id", null)
-            ?.replace("gemini-2.5-flash", "gemini-3.6-flash")
-        // Ollama ids like "llama3.1:8b" are not valid on OpenRouter — swap to a
-        // free OpenRouter default so pull still works; user can change in UI.
-        val modelId = when {
-            providerId == "openai_compatible" &&
-                rawModel != null &&
-                rawModel.contains(":") &&
-                !rawModel.contains("/") -> "google/gemma-3-4b-it:free"
-            else -> rawModel
+        val modelId = when (providerId) {
+            "openai_compatible" -> openAiModel()
+            "ollama" -> ollamaModel()
+            "gemini" -> geminiModel()
+            else -> preferences.getString("model_id", null)
+                ?.replace("gemini-2.5-flash", "gemini-3.6-flash")
         }
         return AiProviderConfig(
             mode = mode,
@@ -87,17 +125,27 @@ class AiPreferences(context: Context) {
         when (config.providerId) {
             "openai_compatible" -> {
                 val ep = config.endpoint?.trim()?.takeIf { it.isNotBlank() } ?: DEFAULT_OPENAI_ENDPOINT
+                val mid = config.modelId?.trim()?.takeIf { it.isNotBlank() } ?: DEFAULT_OPENAI_MODEL
                 editor.putString(KEY_OPENAI_ENDPOINT, ep)
+                editor.putString(KEY_OPENAI_MODEL, mid)
                 editor.putString("endpoint", ep)
             }
             "ollama" -> {
                 val ep = config.endpoint?.trim()?.takeIf { it.isNotBlank() }
                     ?: com.talom.core.TalomPreferences.DEFAULT_OLLAMA_ENDPOINT
+                val mid = config.modelId?.trim()?.takeIf { it.isNotBlank() } ?: DEFAULT_OLLAMA_MODEL
                 editor.putString(KEY_OLLAMA_ENDPOINT, ep)
+                editor.putString(KEY_OLLAMA_MODEL, mid)
                 editor.putString("endpoint", ep)
             }
+            "gemini" -> {
+                val mid = config.modelId?.trim()?.takeIf { it.isNotBlank() } ?: "gemini-3.6-flash"
+                editor.putString(KEY_OPENAI_MODEL, mid)
+                if (config.endpoint != null) editor.putString("endpoint", config.endpoint)
+                else editor.remove("endpoint")
+            }
             else -> {
-                // Gemini / disabled: preserve per-provider endpoints, only update legacy.
+                // Disabled: preserve per-provider endpoints/models, only update legacy.
                 if (config.endpoint != null) editor.putString("endpoint", config.endpoint)
                 else editor.remove("endpoint")
             }

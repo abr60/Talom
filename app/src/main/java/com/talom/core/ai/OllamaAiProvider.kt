@@ -8,6 +8,36 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 
+data class OllamaModelInfo(
+    val name: String,
+    val hasTools: Boolean,
+    val paramSizeBillions: Double,
+    val contextLength: Int,
+)
+
+object OllamaModelRanker {
+    fun parseParamSizeBillions(raw: String?): Double {
+        if (raw.isNullOrBlank()) return 0.0
+        val s = raw.trim()
+        return when {
+            s.endsWith("B", ignoreCase = true) -> s.dropLast(1).toDoubleOrNull() ?: 0.0
+            s.endsWith("M", ignoreCase = true) -> (s.dropLast(1).toDoubleOrNull() ?: 0.0) / 1_000.0
+            s.endsWith("K", ignoreCase = true) -> (s.dropLast(1).toDoubleOrNull() ?: 0.0) / 1_000_000.0
+            else -> s.toDoubleOrNull() ?: 0.0
+        }
+    }
+
+    fun pickBest(models: List<OllamaModelInfo>): OllamaModelInfo? {
+        if (models.isEmpty()) return null
+        return models.sortedWith(
+            compareByDescending<OllamaModelInfo> { if (it.hasTools) 1 else 0 }
+                .thenByDescending { it.paramSizeBillions }
+                .thenByDescending { it.contextLength }
+                .thenBy { it.name }
+        ).firstOrNull()
+    }
+}
+
 class OllamaAiProvider(
     override val config: AiProviderConfig,
 ) : AiProvider {
@@ -26,6 +56,39 @@ class OllamaAiProvider(
                 (0 until models.length()).mapNotNull {
                     models.getJSONObject(it).optString("name").takeIf(String::isNotBlank)
                 }.sorted()
+            } finally {
+                connection.disconnect()
+            }
+        }
+    }
+
+    suspend fun listModelsDetailed(): Result<List<OllamaModelInfo>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val endpoint = config.endpoint?.trim()?.trimEnd('/') ?: error("Ollama endpoint is required.")
+            val connection = URL("$endpoint/api/tags").openConnection() as HttpURLConnection
+            try {
+                connection.requestMethod = "GET"
+                connection.connectTimeout = 5_000
+                connection.readTimeout = 5_000
+                check(connection.responseCode in 200..299) { "Ollama HTTP ${connection.responseCode}" }
+                val models = JSONObject(
+                    connection.inputStream.bufferedReader().use { it.readText() },
+                ).optJSONArray("models") ?: JSONArray()
+                (0 until models.length()).mapNotNull { idx ->
+                    val obj = models.getJSONObject(idx)
+                    val name = obj.optString("name").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                    val capabilities = obj.optJSONArray("capabilities")?.let { arr ->
+                        (0 until arr.length()).map { arr.optString(it) }
+                    } ?: emptyList()
+                    val hasTools = "tools" in capabilities
+                    val details = obj.optJSONObject("details")
+                    val paramRaw = details?.optString("parameter_size")
+                    val paramB = OllamaModelRanker.parseParamSizeBillions(paramRaw)
+                    val ctx = details?.optInt("context_length", 0) ?: 0
+                    // Fallback: some Ollama variants put context in top-level
+                    val ctx2 = if (ctx != 0) ctx else obj.optInt("context_length", 0)
+                    OllamaModelInfo(name, hasTools, paramB, ctx2)
+                }
             } finally {
                 connection.disconnect()
             }

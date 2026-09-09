@@ -54,6 +54,8 @@ import com.talom.core.ai.ConnectionStatus
 import com.talom.core.ai.GeminiAiProvider
 import com.talom.core.ai.ModelRecommender
 import com.talom.core.ai.OllamaAiProvider
+import com.talom.core.ai.OllamaModelInfo
+import com.talom.core.ai.OllamaModelRanker
 import com.talom.core.ai.OpenAiCompatibleAiProvider
 import com.talom.core.auth.GoogleAccountTokenProvider
 import com.talom.core.source.SourceMessage
@@ -206,15 +208,8 @@ private fun TalomApp(
     val initialAiConfig = remember { aiPreferences.config() }
     var aiMode by remember { mutableStateOf(initialAiConfig.mode) }
     var aiKey by remember { mutableStateOf("") }
-    var aiModel by remember {
-        mutableStateOf(
-            initialAiConfig.modelId ?: if (initialAiConfig.providerId == "openai_compatible") {
-                "google/gemma-3-4b-it:free"
-            } else {
-                "gemini-3.6-flash"
-            },
-        )
-    }
+    var openAiModel by remember { mutableStateOf(aiPreferences.openAiModel()) }
+    var ollamaModel by remember { mutableStateOf(aiPreferences.ollamaModel()) }
     var cloudConsent by remember { mutableStateOf(aiPreferences.cloudConsent()) }
     var localConsent by remember { mutableStateOf(aiPreferences.localConsent()) }
     var ollamaEndpoint by remember { mutableStateOf(aiPreferences.ollamaEndpoint()) }
@@ -252,10 +247,10 @@ private fun TalomApp(
     LaunchedEffect(useOpenAiCompatible, availableModels.isNotEmpty(), modelsRefreshKey) {
         if (useOpenAiCompatible &&
             availableModels.isNotEmpty() &&
-            aiModel.isNotBlank() &&
-            aiModel !in availableModels
+            openAiModel.isNotBlank() &&
+            openAiModel !in availableModels
         ) {
-            aiModel = ""
+            openAiModel = ""
             connectionStatus = null
         }
     }
@@ -337,14 +332,18 @@ private fun TalomApp(
         delay(600)
         localModelsLoading = true
         localModelsError = null
-        OllamaAiProvider(
+        val provider = OllamaAiProvider(
             AiProviderConfig(
                 mode = AiMode.LOCAL,
                 providerId = "ollama",
                 modelId = null,
                 endpoint = endpoint,
             ),
-        ).listModels()
+        )
+        // Fetch names for dropdown + detailed info for ranking.
+        val nameResult = provider.listModels()
+        val detailResult = provider.listModelsDetailed()
+        nameResult
             .onSuccess { models ->
                 availableLocalModels = models
                 if (models.isEmpty()) localModelsError = "No models on this Ollama server."
@@ -353,6 +352,19 @@ private fun TalomApp(
                 availableLocalModels = emptyList()
                 localModelsError = "Models unavailable: ${it.message ?: "unknown error"}"
             }
+        // Auto-select best local model if current is blank or not on server.
+        if (nameResult.isSuccess) {
+            val names = nameResult.getOrNull() ?: emptyList()
+            val needsPick = ollamaModel.isBlank() || ollamaModel !in names
+            if (needsPick && names.isNotEmpty()) {
+                val best = detailResult.getOrNull()?.let { infos: List<OllamaModelInfo> ->
+                    OllamaModelRanker.pickBest(infos)
+                }?.name ?: names.sorted().firstOrNull()
+                if (best != null) {
+                    ollamaModel = best
+                }
+            }
+        }
         localModelsLoading = false
     }
     val loadDirectory: () -> Unit = {
@@ -562,12 +574,17 @@ private fun TalomApp(
                         else -> {
                             val doSaveAi: () -> Unit = {
                                 val activeEndpoint = if (aiMode == AiMode.LOCAL) ollamaEndpoint.trim() else if (useOpenAiCompatible) openAiEndpoint.trim() else ""
+                                val activeModel = when (aiMode) {
+                                    AiMode.LOCAL -> ollamaModel.trim()
+                                    AiMode.CLOUD -> openAiModel.trim()
+                                    AiMode.DISABLED -> ""
+                                }
                                 val missing = com.talom.ui.settings.StatusText.aiMissingFields(
                                     mode = aiMode,
                                     useOpenAiCompatible = useOpenAiCompatible,
                                     endpointBlank = if (aiMode == AiMode.LOCAL || useOpenAiCompatible) activeEndpoint.isBlank() else false,
                                     keyBlank = aiKey.isBlank() && savedAiKey.isBlank(),
-                                    modelBlank = aiModel.trim().isBlank(),
+                                    modelBlank = activeModel.isBlank(),
                                     cloudConsent = cloudConsent,
                                     localConsent = localConsent,
                                 )
@@ -582,7 +599,7 @@ private fun TalomApp(
                                                 AiMode.LOCAL -> "ollama"
                                                 AiMode.DISABLED -> null
                                             },
-                                            modelId = if (aiMode != AiMode.DISABLED) aiModel.trim() else null,
+                                            modelId = if (aiMode != AiMode.DISABLED) activeModel else null,
                                             endpoint = when (aiMode) {
                                                 AiMode.CLOUD -> if (useOpenAiCompatible) openAiEndpoint.trim() else null
                                                 AiMode.LOCAL -> ollamaEndpoint.trim()
@@ -618,12 +635,22 @@ private fun TalomApp(
                                         AiProviderConfig(
                                             mode = AiMode.LOCAL,
                                             providerId = "ollama",
-                                            modelId = aiModel.trim(),
+                                            modelId = ollamaModel.trim().ifBlank { null },
                                             endpoint = ollamaEndpoint.trim(),
                                         ),
                                     ).testConnection()
                                         .onSuccess { models ->
                                             localTestState = "Connected. Models: ${models.joinToString()}"
+                                            // If current local model isn't on server, auto-pick best.
+                                            if (models.isNotEmpty() && (ollamaModel.isBlank() || ollamaModel !in models)) {
+                                                val detailed = OllamaAiProvider(
+                                                    AiProviderConfig(mode = AiMode.LOCAL, providerId = "ollama", modelId = null, endpoint = ollamaEndpoint.trim())
+                                                ).listModelsDetailed().getOrNull()
+                                                val best = detailed?.let { infos: List<OllamaModelInfo> ->
+                                                    OllamaModelRanker.pickBest(infos)
+                                                }?.name ?: models.sorted().firstOrNull()
+                                                if (best != null) ollamaModel = best
+                                            }
                                         }
                                         .onFailure {
                                             localTestState = "Connection failed: " + (it.message ?: "unknown error")
@@ -643,7 +670,7 @@ private fun TalomApp(
                                     )
                                 } else {
                                     val effectiveKey = aiKey.ifBlank { savedAiKey }
-                                    val effectiveModel = aiModel.trim().ifBlank { null }
+                                    val effectiveModel = openAiModel.trim().ifBlank { null }
                                     connectionStatus = null
                                     modelRecommendationInProgress = true
                                     scope.launch {
@@ -667,7 +694,7 @@ private fun TalomApp(
                                                 candidateModel = availableModels.first(),
                                             )
                                             recommended?.let {
-                                                aiModel = it
+                                                openAiModel = it
                                                 aiPreferences.setConfig(
                                                     AiProviderConfig(
                                                         mode = aiMode,
@@ -692,8 +719,10 @@ private fun TalomApp(
                                 onAiModeChange = { aiMode = it },
                                 aiKey = aiKey,
                                 onAiKeyChange = { aiKey = it },
-                                aiModel = aiModel,
-                                onAiModelChange = { aiModel = it },
+                                openAiModel = openAiModel,
+                                onOpenAiModelChange = { openAiModel = it },
+                                ollamaModel = ollamaModel,
+                                onOllamaModelChange = { ollamaModel = it },
                                 ollamaEndpoint = ollamaEndpoint,
                                 onOllamaEndpointChange = { ollamaEndpoint = it },
                                 openAiEndpoint = openAiEndpoint,
@@ -709,8 +738,8 @@ private fun TalomApp(
                                             openAiEndpoint = "https://openrouter.ai/api/v1"
                                         }
                                         // Ollama model id won't work on OpenRouter — clear for re-pick.
-                                        if (aiModel.contains(":") && !aiModel.contains("/")) {
-                                            aiModel = ""
+                                        if (openAiModel.contains(":") && !openAiModel.contains("/")) {
+                                            openAiModel = ""
                                         }
                                     }
                                 },

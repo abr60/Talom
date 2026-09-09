@@ -135,14 +135,6 @@ fun AcademicScreen(
 
         StatBar(header = "Overview", stats = overviewStats)
 
-        GoogleClassroomCard(
-            courses = courses,
-            coursework = coursework,
-            announcements = announcements,
-            classroomStatus = classroomStatus,
-            formatTime = formatTime,
-        )
-
         ClassScheduleSection(
             todayClasses = todayClasses,
             upcomingClasses = upcomingClasses,
@@ -179,6 +171,14 @@ fun AcademicScreen(
             items = submitted,
             formatTime = formatTime,
         )
+
+        GoogleClassroomCard(
+            courses = courses,
+            coursework = coursework,
+            announcements = announcements,
+            classroomStatus = classroomStatus,
+            formatTime = formatTime,
+        )
     }
 }
 
@@ -190,35 +190,65 @@ private fun GoogleClassroomCard(
     classroomStatus: SourceStatusEntity?,
     formatTime: (Long) -> String,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SectionHeader("Google Classroom")
-        TalomCard {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    if (courses.isEmpty())
-                        "No Classroom data yet. Connect a Google account in Settings → Google Classroom, then Sync."
-                    else
-                        "Imported ${courses.size} courses, ${coursework.size} assignments, ${announcements.size} announcements.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Text(
-                    "Classroom sync: ${classroomStatus?.state ?: "NOT_CONFIGURED"}" +
-                        (classroomStatus?.detail?.let { " — $it" } ?: ""),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                coursework.take(10).forEach { a ->
+    var expanded by remember { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = if (expanded) "▾  Google Classroom" else "▸  Google Classroom",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.weight(1f),
+            )
+            if (courses.isNotEmpty() || coursework.isNotEmpty() || announcements.isNotEmpty()) {
+                Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                ) {
                     Text(
-                        a.title + (a.dueAtMillis?.let { " • due ${formatTime(it)}" } ?: ""),
-                        style = MaterialTheme.typography.bodyMedium,
+                        text = "${courses.size}",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
                     )
                 }
-                announcements.take(5).forEach { an ->
+            }
+        }
+        if (expanded) {
+            TalomCard {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "Announcement: ${an.text}",
+                        if (courses.isEmpty())
+                            "No Classroom data yet. Connect a Google account in Settings → Google Classroom, then Sync."
+                        else
+                            "Imported ${courses.size} courses, ${coursework.size} assignments, ${announcements.size} announcements.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        "Classroom sync: ${classroomStatus?.state ?: "NOT_CONFIGURED"}" +
+                            (classroomStatus?.detail?.let { " — $it" } ?: ""),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    coursework.take(10).forEach { a ->
+                        Text(
+                            a.title + (a.dueAtMillis?.let { " • due ${formatTime(it)}" } ?: ""),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    announcements.take(5).forEach { an ->
+                        Text(
+                            "Announcement: ${an.text}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }
