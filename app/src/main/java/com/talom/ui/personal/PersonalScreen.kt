@@ -57,7 +57,7 @@ private fun partitionInsights(
             else -> when (categoryByJid[e.sourceJid]) {
                 RelationCategory.FRIENDS -> friends += e
                 RelationCategory.FAMILY -> family += e
-                RelationCategory.WORK, RelationCategory.ACADEMIC, null -> general += e
+                else -> if (e.confidence >= 0.75f) general += e
             }
         }
     }
