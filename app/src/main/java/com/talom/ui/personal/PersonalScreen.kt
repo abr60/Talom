@@ -18,45 +18,63 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.talom.core.ai.InsightType
 import com.talom.data.academic.ConversationInsightEntity
+import com.talom.data.source.PullLogEntity
+import com.talom.data.whatsapp.RelationCategory
 import com.talom.data.whatsapp.WhatsAppWhitelist
 import com.talom.source.whatsapp.WhatsAppConversation
 import com.talom.ui.components.AppHeader
+import com.talom.ui.components.PullStatusBanner
 import com.talom.ui.components.SectionHeader
 import com.talom.ui.components.StatBar
 import com.talom.ui.components.TalomCard
-import java.util.concurrent.TimeUnit
 
-private enum class InsightGroup { REMINDERS, PEOPLE, GENERAL }
+private enum class InsightGroup { REMINDERS, FRIENDS, FAMILY, GENERAL }
 
+private fun messageKey(jid: String, messageId: Long): String = "$jid|$messageId"
+
+/**
+ * Route insights by whitelist relationship for Friends/Family/General.
+ * Reminders stay type-driven (PERSONAL_REMINDER / PLAN).
+ */
 private fun partitionInsights(
     items: List<ConversationInsightEntity>,
+    categoryByJid: Map<String, RelationCategory>,
+    fromMeKeys: Set<String>,
 ): Map<InsightGroup, List<ConversationInsightEntity>> {
     val reminders = mutableListOf<ConversationInsightEntity>()
-    val people = mutableListOf<ConversationInsightEntity>()
+    val friends = mutableListOf<ConversationInsightEntity>()
+    val family = mutableListOf<ConversationInsightEntity>()
     val general = mutableListOf<ConversationInsightEntity>()
     items.forEach { e ->
-        when (runCatching { InsightType.valueOf(e.type) }.getOrNull()) {
+        val type = runCatching { InsightType.valueOf(e.type) }.getOrNull()
+        val fromMe = messageKey(e.sourceJid, e.sourceMessageId) in fromMeKeys
+        // Hide standard sent messages; keep user-originated plan/reminder confirmations.
+        if (fromMe && type != InsightType.PERSONAL_REMINDER && type != InsightType.PLAN) {
+            return@forEach
+        }
+        when (type) {
             InsightType.PERSONAL_REMINDER, InsightType.PLAN -> reminders += e
-            InsightType.FAMILY, InsightType.FRIEND -> people += e
-            InsightType.GENERAL, null -> general += e
+            else -> when (categoryByJid[e.sourceJid]) {
+                RelationCategory.FRIENDS -> friends += e
+                RelationCategory.FAMILY -> family += e
+                RelationCategory.WORK, RelationCategory.ACADEMIC, null -> general += e
+            }
         }
     }
     return mapOf(
         InsightGroup.REMINDERS to reminders,
-        InsightGroup.PEOPLE to people,
+        InsightGroup.FRIENDS to friends,
+        InsightGroup.FAMILY to family,
         InsightGroup.GENERAL to general,
     )
 }
 
-private fun timeBucket(storedAtMillis: Long, now: Long): String = when {
-    now - storedAtMillis <= TimeUnit.DAYS.toMillis(1) -> "Today"
-    now - storedAtMillis <= TimeUnit.DAYS.toMillis(7) -> "This week"
-    else -> "Older"
-}
+private fun displayMillis(item: ConversationInsightEntity): Long =
+    item.receivedAtMillis ?: item.storedAtMillis
 
-private fun relativeTime(storedAtMillis: Long, now: Long): String =
+private fun relativeTime(millis: Long, now: Long): String =
     DateUtils.getRelativeTimeSpanString(
-        storedAtMillis,
+        millis,
         now,
         DateUtils.MINUTE_IN_MILLIS,
         DateUtils.FORMAT_ABBREV_RELATIVE,
@@ -67,6 +85,8 @@ fun PersonalScreen(
     insights: List<ConversationInsightEntity>,
     whitelist: List<WhatsAppWhitelist>,
     directory: List<WhatsAppConversation>,
+    fromMeKeys: Set<String> = emptySet(),
+    latestPullLog: PullLogEntity? = null,
 ) {
     val now = remember(insights) { System.currentTimeMillis() }
     val senderByJid = remember(whitelist, directory) {
@@ -75,11 +95,22 @@ fun PersonalScreen(
             directory.forEach { c -> putIfAbsent(c.jid, c.label) }
         }
     }
-    val groups = remember(insights) { partitionInsights(insights) }
-    val totalInsights = insights.size
-    val todayCount = insights.count { timeBucket(it.storedAtMillis, now) == "Today" }
-    val weekCount = insights.count { timeBucket(it.storedAtMillis, now) == "This week" }
-    val olderCount = totalInsights - todayCount - weekCount
+    val categoryByJid = remember(whitelist) {
+        whitelist.associate { it.jid to it.category }
+    }
+    val groups = remember(insights, categoryByJid, fromMeKeys) {
+        partitionInsights(insights, categoryByJid, fromMeKeys)
+    }
+    val totalInsights = groups.values.sumOf { it.size }
+
+    val overviewStats = remember(groups) {
+        listOf(
+            (groups[InsightGroup.REMINDERS]?.size ?: 0) to "Reminders",
+            (groups[InsightGroup.FRIENDS]?.size ?: 0) to "Friends",
+            (groups[InsightGroup.FAMILY]?.size ?: 0) to "Family",
+            (groups[InsightGroup.GENERAL]?.size ?: 0) to "General",
+        ).filter { it.first > 0 }.map { it.first.toString() to it.second }
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(28.dp)) {
         AppHeader(
@@ -95,83 +126,143 @@ fun PersonalScreen(
             fontWeight = FontWeight.Bold,
         )
 
-        // Overview: time-bucket counts (or single empty-state line)
-        if (totalInsights == 0) {
-            TalomCard {
+        PullStatusBanner(latestPullLog)
+
+        if (overviewStats.isNotEmpty()) {
+            StatBar(
+                header = "Overview",
+                stats = overviewStats,
+            )
+        }
+
+        ReminderSection(
+            title = "Reminders & plans",
+            items = groups[InsightGroup.REMINDERS].orEmpty(),
+            emptyCaption = "No reminders or plans yet — they'll show up as your chats come in.",
+            now = now,
+            senderByJid = senderByJid,
+        )
+
+        ContactGroupedSection(
+            title = "Friends",
+            items = groups[InsightGroup.FRIENDS].orEmpty(),
+            emptyCaption = "Nothing from friends yet — hang tight.",
+            now = now,
+            senderByJid = senderByJid,
+        )
+
+        ContactGroupedSection(
+            title = "Family",
+            items = groups[InsightGroup.FAMILY].orEmpty(),
+            emptyCaption = "No family updates yet.",
+            now = now,
+            senderByJid = senderByJid,
+        )
+
+        ContactGroupedSection(
+            title = "General",
+            items = groups[InsightGroup.GENERAL].orEmpty(),
+            emptyCaption = "Other bits from conversations will land here.",
+            now = now,
+            senderByJid = senderByJid,
+        )
+    }
+}
+
+@Composable
+private fun ReminderSection(
+    title: String,
+    items: List<ConversationInsightEntity>,
+    emptyCaption: String,
+    now: Long,
+    senderByJid: Map<String, String>,
+) {
+    val sorted = remember(items) { items.sortedByDescending { displayMillis(it) } }
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        SectionHeader(title)
+        TalomCard {
+            if (sorted.isEmpty()) {
                 Text(
-                    "Pull with AI enabled to see what was found in your conversations.",
+                    text = emptyCaption,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                 )
+            } else {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    sorted.forEachIndexed { idx, item ->
+                        if (idx > 0) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                        }
+                        InsightRow(item = item, now = now, senderByJid = senderByJid)
+                    }
+                }
             }
-        } else {
-            StatBar(
-                header = "Overview",
-                stats = listOf(
-                    todayCount.toString() to "Today",
-                    weekCount.toString() to "This week",
-                    olderCount.toString() to "Older",
-                ),
-            )
-        }
-
-        // Reminders & plans — hidden when empty
-        val reminders = groups[InsightGroup.REMINDERS].orEmpty()
-        if (reminders.isNotEmpty()) {
-            InsightSection(
-                title = "Reminders & plans",
-                items = reminders,
-                now = now,
-                senderByJid = senderByJid,
-            )
-        }
-
-        // Family & friends — hidden when empty
-        val people = groups[InsightGroup.PEOPLE].orEmpty()
-        if (people.isNotEmpty()) {
-            InsightSection(
-                title = "Family & friends",
-                items = people,
-                now = now,
-                senderByJid = senderByJid,
-            )
-        }
-
-        // General — hidden when empty
-        val general = groups[InsightGroup.GENERAL].orEmpty()
-        if (general.isNotEmpty()) {
-            InsightSection(
-                title = "General",
-                items = general,
-                now = now,
-                senderByJid = senderByJid,
-            )
         }
     }
 }
 
 @Composable
-private fun InsightSection(
+private fun ContactGroupedSection(
     title: String,
     items: List<ConversationInsightEntity>,
+    emptyCaption: String,
     now: Long,
     senderByJid: Map<String, String>,
 ) {
-    val sorted = remember(items) { items.sortedByDescending { it.storedAtMillis } }
+    val byContact = remember(items, senderByJid) {
+        items
+            .groupBy { senderByJid[it.sourceJid] ?: it.sourceJid }
+            .toList()
+            .sortedBy { it.first.lowercase() }
+            .map { (contact, list) ->
+                contact to list.sortedByDescending { displayMillis(it) }
+            }
+    }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SectionHeader(title)
         TalomCard {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
-            ) {
-                sorted.forEachIndexed { idx, item ->
-                    if (idx > 0) {
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+            if (byContact.isEmpty()) {
+                Text(
+                    text = emptyCaption,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                )
+            } else {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(18.dp),
+                ) {
+                    byContact.forEachIndexed { groupIdx, (contact, contactItems) ->
+                        if (groupIdx > 0) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                        }
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text(
+                                text = contact,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            contactItems.forEachIndexed { idx, item ->
+                                if (idx > 0) {
+                                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+                                }
+                                InsightRow(
+                                    item = item,
+                                    now = now,
+                                    senderByJid = senderByJid,
+                                    showSender = false,
+                                )
+                            }
+                        }
                     }
-                    InsightRow(item = item, now = now, senderByJid = senderByJid)
                 }
             }
         }
@@ -183,6 +274,7 @@ private fun InsightRow(
     item: ConversationInsightEntity,
     now: Long,
     senderByJid: Map<String, String>,
+    showSender: Boolean = true,
 ) {
     val sender = senderByJid[item.sourceJid]
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -201,12 +293,12 @@ private fun InsightRow(
         Spacer(Modifier.height(2.dp))
         Text(
             text = buildString {
-                if (sender != null) {
+                if (showSender && sender != null) {
                     append("from ")
                     append(sender)
                     append(" · ")
                 }
-                append(relativeTime(item.storedAtMillis, now))
+                append(relativeTime(displayMillis(item), now))
             },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

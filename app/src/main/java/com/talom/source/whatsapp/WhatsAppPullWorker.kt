@@ -42,6 +42,7 @@ class WhatsAppPullWorker(
             academicExtractionService = aiService,
             academicItemRepository = AcademicItemRepository(database.academicItemDao()),
             conversationInsightRepository = ConversationInsightRepository(database.conversationInsightDao()),
+            messageWindowDays = { preferences.messageWindowDays() },
         ).pull()
         if (result.isSuccess) {
             result.getOrThrow().let { pull ->

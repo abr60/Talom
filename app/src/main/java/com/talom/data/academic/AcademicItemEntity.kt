@@ -19,6 +19,9 @@ data class AcademicItemEntity(
     val providerId: String,
     val modelId: String,
     val storedAtMillis: Long,
+    val done: Boolean = false,
+    val submittedAtMillis: Long? = null,
+    val receivedAtMillis: Long? = null,
 ) {
     fun toDomain(): AcademicItem = AcademicItem(
         stableId = stableId,
@@ -39,6 +42,9 @@ data class AcademicItemEntity(
             providerId: String,
             modelId: String,
             storedAtMillis: Long = System.currentTimeMillis(),
+            done: Boolean = false,
+            submittedAtMillis: Long? = null,
+            receivedAtMillis: Long? = null,
         ) = AcademicItemEntity(
             stableId = item.stableId,
             type = item.type.name,
@@ -53,6 +59,9 @@ data class AcademicItemEntity(
             providerId = providerId,
             modelId = modelId,
             storedAtMillis = storedAtMillis,
+            done = done,
+            submittedAtMillis = submittedAtMillis,
+            receivedAtMillis = receivedAtMillis,
         )
     }
 }

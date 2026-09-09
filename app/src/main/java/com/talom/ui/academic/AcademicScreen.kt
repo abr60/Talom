@@ -1,17 +1,16 @@
 package com.talom.ui.academic
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -29,23 +28,18 @@ import com.talom.data.academic.AcademicItemEntity
 import com.talom.data.classroom.ClassroomAnnouncementEntity
 import com.talom.data.classroom.ClassroomCourseEntity
 import com.talom.data.classroom.ClassroomCourseworkEntity
+import com.talom.data.source.PullLogEntity
 import com.talom.data.source.SourceStatusEntity
-import com.talom.ui.components.ActionRow
 import com.talom.ui.components.AppHeader
+import com.talom.ui.components.PullStatusBanner
 import com.talom.ui.components.SectionHeader
 import com.talom.ui.components.StatBar
 import com.talom.ui.components.TalomCard
 import java.time.Instant
-import java.time.LocalDate
 import java.time.ZoneId
 
-// 36 hours covers the rest of today + all of tomorrow, so the user sees
-// both "what's left today" and "what's tomorrow morning" in one card.
-private const val NEXT_36H_MS = 36L * 60 * 60 * 1000
-private const val WEEK_MS = 7L * 24 * 60 * 60 * 1000
-
 private val ASSESSMENT_TYPES = setOf(
-    "EXAM", "CLASS_TEST", "VIVA", "PRACTICAL", "INTERVIEW", "PRESENTATION",
+    "EXAM", "CLASS_TEST", "VIVA", "PRESENTATION", "PRACTICAL", "INTERVIEW",
 )
 
 @Composable
@@ -56,29 +50,77 @@ fun AcademicScreen(
     announcements: List<ClassroomAnnouncementEntity>,
     classroomStatus: SourceStatusEntity?,
     formatTime: (Long) -> String,
-    onClearAll: () -> Unit,
+    onMarkDone: (String) -> Unit = {},
+    latestPullLog: PullLogEntity? = null,
 ) {
     val now = remember { System.currentTimeMillis() }
-    val upcoming = remember(academicItems, now) {
-        academicItems
-            .filter { it.dueAtMillis != null && it.dueAtMillis >= now }
-            .sortedBy { it.dueAtMillis }
+    val zone = remember { ZoneId.systemDefault() }
+    val today = remember(now, zone) { Instant.ofEpochMilli(now).atZone(zone).toLocalDate() }
+    val todayStart = remember(today, zone) {
+        today.atStartOfDay(zone).toInstant().toEpochMilli()
     }
-    val next36h = remember(upcoming, now) {
-        upcoming.filter { it.dueAtMillis!! - now <= NEXT_36H_MS }
+    val todayEnd = remember(today, zone) {
+        today.atTime(23, 59, 59, 999_000_000).atZone(zone).toInstant().toEpochMilli()
     }
-    val thisWeek = remember(upcoming, now) {
-        upcoming.filter {
-            val delta = it.dueAtMillis!! - now
-            delta in (NEXT_36H_MS + 1)..WEEK_MS
+    val weekEndMs = remember(today, zone) {
+        today.plusDays(7).atTime(23, 59, 59, 999_000_000).atZone(zone).toInstant().toEpochMilli()
+    }
+
+    val pending = remember(academicItems) { academicItems.filter { !it.done } }
+    val submitted = remember(academicItems) {
+        academicItems.filter { it.done }.sortedByDescending { it.submittedAtMillis ?: 0L }
+    }
+    val pendingAssignments = remember(pending) {
+        pending.filter { it.type == "ASSIGNMENT" }
+            .sortedWith(compareBy({ it.dueAtMillis ?: Long.MAX_VALUE }, { it.receivedAtMillis ?: it.storedAtMillis }))
+    }
+    val assessments = remember(pending) {
+        pending.filter { it.type in ASSESSMENT_TYPES }
+            .sortedBy { it.dueAtMillis ?: Long.MAX_VALUE }
+    }
+    val deadlines = remember(pending) {
+        pending.filter { it.type == "DEADLINE" }
+            .sortedBy { it.dueAtMillis ?: Long.MAX_VALUE }
+    }
+    val announcementItems = remember(pending) {
+        pending.filter { it.type == "ANNOUNCEMENT" }
+            .sortedByDescending { it.receivedAtMillis ?: it.storedAtMillis }
+    }
+    // Today: any class scheduled for calendar today (even if the hour already passed).
+    val todayClasses = remember(pending, todayStart, todayEnd) {
+        pending.filter {
+            it.type == "CLASS_SCHEDULE" &&
+                it.dueAtMillis != null &&
+                it.dueAtMillis in todayStart..todayEnd
+        }.sortedBy { it.dueAtMillis }
+    }
+    // Upcoming: tomorrow through +7 days (fixes "tomorrow not shown").
+    val upcomingClasses = remember(pending, todayEnd, weekEndMs) {
+        pending.filter {
+            it.type == "CLASS_SCHEDULE" &&
+                it.dueAtMillis != null &&
+                it.dueAtMillis > todayEnd &&
+                it.dueAtMillis <= weekEndMs
+        }.sortedBy { it.dueAtMillis }
+    }
+    val scheduleCancellations = remember(pending, todayStart, weekEndMs, today, zone) {
+        pending.filter { item ->
+            item.type == "CANCELLATION" && (
+                (item.dueAtMillis != null && item.dueAtMillis in todayStart..weekEndMs) ||
+                    (item.dueAtMillis == null &&
+                        Instant.ofEpochMilli(item.receivedAtMillis ?: item.storedAtMillis)
+                            .atZone(zone).toLocalDate() >= today.minusDays(1))
+                )
         }
     }
-    val byType = remember(academicItems, now) {
-        // Already-past items are still in this view (for "what I missed"
-        // context) but only within the past day. Pruning handles older.
-        academicItems
-            .filter { it.dueAtMillis == null || it.dueAtMillis >= now - 24L * 60 * 60 * 1000 }
-            .groupBy { it.type }
+    val upcomingClassCount = todayClasses.size + upcomingClasses.size
+
+    val overviewStats = remember(pendingAssignments, assessments, upcomingClassCount) {
+        listOf(
+            pendingAssignments.size.toString() to "Assignments",
+            assessments.size.toString() to "Assessments",
+            upcomingClassCount.toString() to "Classes (7d)",
+        )
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(28.dp)) {
@@ -88,14 +130,10 @@ fun AcademicScreen(
             style = MaterialTheme.typography.headlineMedium,
             fontWeight = FontWeight.Bold,
         )
-        StatBar(
-            header = "Overview",
-            stats = listOf(
-                next36h.size.toString() to "Next 36h",
-                thisWeek.size.toString() to "This week",
-                academicItems.size.toString() to "All",
-            ),
-        )
+
+        PullStatusBanner(latestPullLog)
+
+        StatBar(header = "Overview", stats = overviewStats)
 
         GoogleClassroomCard(
             courses = courses,
@@ -105,75 +143,42 @@ fun AcademicScreen(
             formatTime = formatTime,
         )
 
-        WindowCard(
-            title = "Next 36 hours",
-            caption = if (next36h.isEmpty()) "Nothing scheduled in the next day and a half."
-                else "${next36h.size} ${if (next36h.size == 1) "item" else "items"} happening soon.",
-            items = next36h,
+        ClassScheduleSection(
+            todayClasses = todayClasses,
+            upcomingClasses = upcomingClasses,
+            cancellations = scheduleCancellations,
             formatTime = formatTime,
         )
 
-        WindowCard(
-            title = "This week",
-            caption = if (thisWeek.isEmpty()) "Nothing else on the radar this week."
-                else "${thisWeek.size} more in the next ${(WEEK_MS / (24 * 60 * 60 * 1000))} days.",
-            items = thisWeek,
+        AssignmentsSection(
+            items = pendingAssignments,
+            formatTime = formatTime,
+            onMarkDone = onMarkDone,
+        )
+
+        ExamsSection(
+            items = assessments,
             formatTime = formatTime,
         )
 
-        SectionHeader("By type")
-        CollapsibleGroup(
-            title = "Assessments",
-            count = byType.filterKeys { it in ASSESSMENT_TYPES }.values.sumOf { it.size },
-            items = byType.filterKeys { it in ASSESSMENT_TYPES }
-                .flatMap { it.value }
-                .sortedBy { it.dueAtMillis ?: Long.MAX_VALUE },
-            formatTime = formatTime,
-        )
-        CollapsibleGroup(
-            title = "Assignments",
-            count = byType["ASSIGNMENT"]?.size ?: 0,
-            items = byType["ASSIGNMENT"].orEmpty()
-                .sortedBy { it.dueAtMillis ?: Long.MAX_VALUE },
-            formatTime = formatTime,
-        )
-        CollapsibleGroup(
-            title = "Class schedule",
-            count = byType["CLASS_SCHEDULE"]?.size ?: 0,
-            items = byType["CLASS_SCHEDULE"].orEmpty()
-                .sortedBy { it.dueAtMillis ?: Long.MAX_VALUE },
-            formatTime = formatTime,
-        )
-        CollapsibleGroup(
+        SimpleItemsSection(
             title = "Deadlines",
-            count = byType["DEADLINE"]?.size ?: 0,
-            items = byType["DEADLINE"].orEmpty()
-                .sortedBy { it.dueAtMillis ?: Long.MAX_VALUE },
+            items = deadlines,
             formatTime = formatTime,
-        )
-        CollapsibleGroup(
-            title = "Announcements",
-            count = byType["ANNOUNCEMENT"]?.size ?: 0,
-            items = byType["ANNOUNCEMENT"].orEmpty()
-                .sortedBy { it.storedAtMillis },
-            formatTime = formatTime,
-        )
-        CollapsibleGroup(
-            title = "Cancellations",
-            count = byType["CANCELLATION"]?.size ?: 0,
-            items = byType["CANCELLATION"].orEmpty()
-                .sortedBy { it.storedAtMillis },
-            formatTime = formatTime,
+            emptyCaption = null,
         )
 
-        if (academicItems.isNotEmpty()) {
-            ActionRow(
-                label = "Clear all academic items",
-                caption = "Removes every cached item. Next pull will refill.",
-                actionLabel = "Clear",
-                onAction = onClearAll,
-            )
-        }
+        SimpleItemsSection(
+            title = "Announcements",
+            items = announcementItems,
+            formatTime = formatTime,
+            emptyCaption = null,
+        )
+
+        SubmittedSection(
+            items = submitted,
+            formatTime = formatTime,
+        )
     }
 }
 
@@ -221,45 +226,183 @@ private fun GoogleClassroomCard(
 }
 
 @Composable
-private fun WindowCard(
-    title: String,
-    caption: String?,
-    items: List<AcademicItemEntity>,
+private fun ClassScheduleSection(
+    todayClasses: List<AcademicItemEntity>,
+    upcomingClasses: List<AcademicItemEntity>,
+    cancellations: List<AcademicItemEntity>,
     formatTime: (Long) -> String,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SectionHeader(title)
+        SectionHeader("Class schedule")
         TalomCard {
-            if (items.isEmpty()) {
+            if (todayClasses.isEmpty() && upcomingClasses.isEmpty() && cancellations.isEmpty()) {
                 Text(
-                    caption ?: "Nothing here.",
+                    "No class today — enjoy your day",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth(),
                 )
             } else {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    items.forEach { item ->
-                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    ScheduleDayBlock(
+                        label = "Today",
+                        classes = todayClasses,
+                        emptyFallback = "No class today — enjoy your day",
+                        formatTime = formatTime,
+                    )
+                    if (upcomingClasses.isNotEmpty()) {
+                        ScheduleDayBlock(
+                            label = "Upcoming",
+                            classes = upcomingClasses,
+                            emptyFallback = null,
+                            formatTime = formatTime,
+                        )
+                    }
+                    cancellations.forEach { item ->
+                        Text(
+                            text = "Cancelled: ${item.title}" + (item.subject?.let { " ($it)" } ?: ""),
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        item.details?.let {
                             Text(
-                                text = item.title + (item.subject?.let { " ($it)" } ?: ""),
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.SemiBold,
+                                text = it,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
-                            item.details?.let {
-                                Text(
-                                    text = it,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ScheduleDayBlock(
+    label: String,
+    classes: List<AcademicItemEntity>,
+    emptyFallback: String?,
+    formatTime: (Long) -> String,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (classes.isEmpty()) {
+            if (emptyFallback != null) {
+                Text(
+                    emptyFallback,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        } else {
+            classes.groupBy { courseKey(it) }.forEach { (course, items) ->
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = course,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    items.forEach { item ->
+                        AcademicItemBlock(
+                            item = item,
+                            formatTime = formatTime,
+                            showReceived = false,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SimpleItemsSection(
+    title: String,
+    items: List<AcademicItemEntity>,
+    formatTime: (Long) -> String,
+    emptyCaption: String?,
+) {
+    if (items.isEmpty() && emptyCaption == null) return
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        SectionHeader(title)
+        TalomCard {
+            if (items.isEmpty()) {
+                Text(
+                    emptyCaption ?: "Nothing here.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    items.forEach { item ->
+                        AcademicItemBlock(
+                            item = item,
+                            formatTime = formatTime,
+                            showReceived = true,
+                            typeLabel = typeLabel(item.type),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AssignmentsSection(
+    items: List<AcademicItemEntity>,
+    formatTime: (Long) -> String,
+    onMarkDone: (String) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        SectionHeader("Assignments")
+        TalomCard {
+            if (items.isEmpty()) {
+                Text(
+                    "No pending assignments.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    items.forEach { item ->
+                        var visible by remember(item.stableId) { mutableStateOf(true) }
+                        AnimatedVisibility(
+                            visible = visible,
+                            exit = fadeOut() + shrinkVertically(),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.Top,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Checkbox(
+                                    checked = false,
+                                    onCheckedChange = {
+                                        visible = false
+                                        onMarkDone(item.stableId)
+                                    },
                                 )
-                            }
-                            item.dueAtMillis?.let {
-                                Text(
-                                    text = "${formatTime(it)} · ${typeLabel(item.type)}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    AcademicItemBlock(
+                                        item = item,
+                                        formatTime = formatTime,
+                                        showReceived = true,
+                                    )
+                                }
                             }
                         }
                     }
@@ -270,13 +413,34 @@ private fun WindowCard(
 }
 
 @Composable
-private fun CollapsibleGroup(
-    title: String,
-    count: Int,
+private fun ExamsSection(
     items: List<AcademicItemEntity>,
     formatTime: (Long) -> String,
 ) {
-    if (count == 0) return
+    if (items.isEmpty()) return
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        SectionHeader("Exams & assessments")
+        TalomCard {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                items.forEach { item ->
+                    AcademicItemBlock(
+                        item = item,
+                        formatTime = formatTime,
+                        showReceived = true,
+                        typeLabel = typeLabel(item.type),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SubmittedSection(
+    items: List<AcademicItemEntity>,
+    formatTime: (Long) -> String,
+) {
+    if (items.isEmpty()) return
     var expanded by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(
@@ -287,7 +451,7 @@ private fun CollapsibleGroup(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = if (expanded) "▾  $title" else "▸  $title",
+                text = if (expanded) "▾  Submitted" else "▸  Submitted",
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.weight(1f),
@@ -298,7 +462,7 @@ private fun CollapsibleGroup(
                 contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
             ) {
                 Text(
-                    text = count.toString(),
+                    text = items.size.toString(),
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
@@ -308,32 +472,72 @@ private fun CollapsibleGroup(
         if (expanded) {
             TalomCard {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    items.take(20).forEach { item ->
-                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text(
-                                text = item.title + (item.subject?.let { " ($it)" } ?: ""),
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                            item.details?.let {
-                                Text(
-                                    text = it,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                            item.dueAtMillis?.let {
-                                Text(
-                                    text = formatTime(it),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        }
+                    items.forEach { item ->
+                        AcademicItemBlock(
+                            item = item,
+                            formatTime = formatTime,
+                            showReceived = true,
+                            subtitleOverride = item.submittedAtMillis?.let { "Submitted ${formatTime(it)}" },
+                        )
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AcademicItemBlock(
+    item: AcademicItemEntity,
+    formatTime: (Long) -> String,
+    showReceived: Boolean,
+    typeLabel: String? = null,
+    subtitleOverride: String? = null,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            text = item.title + (item.subject?.let { " ($it)" } ?: ""),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
+        item.details?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        val meta = subtitleOverride ?: buildString {
+            typeLabel?.let {
+                append(it)
+                append(" · ")
+            }
+            item.dueAtMillis?.let {
+                append(formatTime(it))
+                if (showReceived) append(" · ")
+            }
+            if (showReceived) {
+                val received = item.receivedAtMillis ?: item.storedAtMillis
+                append("received ${formatTime(received)}")
+            }
+        }
+        if (meta.isNotBlank()) {
+            Text(
+                text = meta,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** Prefer "CODE > Title" when subject looks like a code; otherwise subject or title. */
+private fun courseKey(item: AcademicItemEntity): String {
+    val subject = item.subject?.trim().orEmpty()
+    return when {
+        subject.isBlank() -> item.title
+        subject.contains('>') -> subject
+        else -> "$subject > ${item.title}"
     }
 }
 

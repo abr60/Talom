@@ -26,6 +26,9 @@ data class AcademicExtractionResult(
     val providerId: String,
     val modelId: String,
     val schemaVersion: Int,
+    val validationErrors: List<String> = emptyList(),
+    val droppedItemCount: Int = 0,
+    val droppedInsightCount: Int = 0,
 )
 
 data class ConversationInsight(

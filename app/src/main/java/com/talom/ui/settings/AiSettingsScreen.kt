@@ -44,8 +44,10 @@ fun AiSettingsScreen(
     onAiKeyChange: (String) -> Unit,
     aiModel: String,
     onAiModelChange: (String) -> Unit,
-    aiEndpoint: String,
-    onAiEndpointChange: (String) -> Unit,
+    ollamaEndpoint: String,
+    onOllamaEndpointChange: (String) -> Unit,
+    openAiEndpoint: String,
+    onOpenAiEndpointChange: (String) -> Unit,
     useOpenAiCompatible: Boolean,
     onUseOpenAiCompatibleChange: (Boolean) -> Unit,
     cloudConsent: Boolean,
@@ -97,8 +99,8 @@ fun AiSettingsScreen(
                     onAiKeyChange = onAiKeyChange,
                     aiModel = aiModel,
                     onAiModelChange = onAiModelChange,
-                    aiEndpoint = aiEndpoint,
-                    onAiEndpointChange = onAiEndpointChange,
+                    openAiEndpoint = openAiEndpoint,
+                    onOpenAiEndpointChange = onOpenAiEndpointChange,
                     useOpenAiCompatible = useOpenAiCompatible,
                     onUseOpenAiCompatibleChange = onUseOpenAiCompatibleChange,
                     cloudConsent = cloudConsent,
@@ -115,7 +117,7 @@ fun AiSettingsScreen(
                 )
                 AiMode.LOCAL -> {
                     Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp)) {
-                        OutlinedTextField(value = aiEndpoint, onValueChange = onAiEndpointChange, label = { Text("Ollama endpoint") }, singleLine = true, modifier = Modifier.fillMaxWidth(), colors = fieldColors)
+                        OutlinedTextField(value = ollamaEndpoint, onValueChange = onOllamaEndpointChange, label = { Text("Ollama endpoint") }, singleLine = true, modifier = Modifier.fillMaxWidth(), colors = fieldColors)
                         AiModelDropdown(value = aiModel, onValueChange = onAiModelChange, models = availableLocalModels, loading = localModelsLoading, error = localModelsError, label = "Local model", fieldColors = fieldColors, emptyHint = "Enter endpoint to list models.")
                     }
                     HorizontalDivider(modifier = Modifier.padding(horizontal = 20.dp), color = MaterialTheme.colorScheme.outline)
@@ -155,8 +157,8 @@ private fun CloudSection(
     onAiKeyChange: (String) -> Unit,
     aiModel: String,
     onAiModelChange: (String) -> Unit,
-    aiEndpoint: String,
-    onAiEndpointChange: (String) -> Unit,
+    openAiEndpoint: String,
+    onOpenAiEndpointChange: (String) -> Unit,
     useOpenAiCompatible: Boolean,
     onUseOpenAiCompatibleChange: (Boolean) -> Unit,
     cloudConsent: Boolean,
@@ -186,8 +188,8 @@ private fun CloudSection(
         Spacer(Modifier.height(8.dp))
         if (useOpenAiCompatible) {
             OutlinedTextField(
-                value = aiEndpoint,
-                onValueChange = onAiEndpointChange,
+                value = openAiEndpoint,
+                onValueChange = onOpenAiEndpointChange,
                 label = { Text("Endpoint URL") },
                 placeholder = { Text("https://openrouter.ai/api/v1") },
                 singleLine = true,
@@ -242,9 +244,9 @@ private fun CloudSection(
         label = "Allow cloud processing",
         caption = buildString {
             append("Message text will leave this phone.")
-            if (useOpenAiCompatible && aiEndpoint.isNotBlank()) {
+            if (useOpenAiCompatible && openAiEndpoint.isNotBlank()) {
                 append(" Sent to: ")
-                append(aiEndpoint)
+                append(openAiEndpoint)
             } else if (!useOpenAiCompatible) {
                 append(" Sent to Google Gemini.")
             }

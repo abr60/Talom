@@ -2,13 +2,14 @@ package com.talom.core.ai
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class ExtractionValidationTest {
     @Test
     fun academicValidationKeepsValidItemsAndDeduplicatesStableIds() {
         val valid = academic("same")
         val duplicate = academic("same", title = "duplicate")
-        val invalidAssignment = academic(
+        val assignmentNoDue = academic(
             stableId = "assignment",
             type = AcademicItemType.ASSIGNMENT,
             dueAtMillis = null,
@@ -17,12 +18,14 @@ class ExtractionValidationTest {
         val wrongVersion = academic("version", extractionVersion = 2)
 
         val result = AcademicItemValidator.validateAll(
-            listOf(valid, duplicate, invalidAssignment, invalidConfidence, wrongVersion),
+            listOf(valid, duplicate, assignmentNoDue, invalidConfidence, wrongVersion),
             expectedVersion = 1,
-        ).getOrThrow()
+        )
 
-        assertEquals(listOf("same"), result.map { it.stableId })
-        assertEquals("valid", result.single().title)
+        assertEquals(listOf("same", "assignment"), result.valid.map { it.stableId })
+        assertEquals("valid", result.valid.first().title)
+        assertTrue(result.errors.any { it.startsWith("warn:") })
+        assertTrue(result.errors.any { it.startsWith("drop:") })
     }
 
     @Test
@@ -35,10 +38,18 @@ class ExtractionValidationTest {
         val result = ConversationInsightValidator.validateAll(
             listOf(valid, duplicate, invalid, wrongVersion),
             expectedVersion = 1,
-        ).getOrThrow()
+        )
 
-        assertEquals(listOf("same"), result.map { it.stableId })
-        assertEquals("valid", result.single().title)
+        assertEquals(listOf("same"), result.valid.map { it.stableId })
+        assertEquals("valid", result.valid.single().title)
+        assertTrue(result.errors.isNotEmpty())
+    }
+
+    @Test
+    fun bengaliTokenEstimateIsHigherThanEnglish() {
+        val english = "Hello this is a short English message about class tomorrow"
+        val bengali = "আগামীকাল সকালে মাইক্রোইকোনমিক্স ক্লাস হবে রুম তিনশো দুই"
+        assertTrue(AiPrompt.estimateTokens(bengali) > AiPrompt.estimateTokens(english))
     }
 
     private fun academic(

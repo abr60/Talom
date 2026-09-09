@@ -1,11 +1,11 @@
 package com.talom.core.ai
 
-import com.talom.core.source.SourceMessage
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 class GeminiAiProvider(
@@ -22,9 +22,11 @@ class GeminiAiProvider(
             )
         }
         return withContext(Dispatchers.IO) {
-            val models = (listOf(config.modelId) + discoverModels())
-                .filterNotNull()
-                .filter { it.isNotBlank() }
+            val configured = config.modelId!!.trim().takeIf { it.isNotBlank() }
+            // Only hit /models when no model is configured; otherwise use configured directly.
+            // On 404 we lazily discover as fallback.
+            var candidates: List<String> = if (configured != null) listOf(configured) else discoverModels()
+            candidates = candidates.filter { it.isNotBlank() }
                 .filter { name ->
                     val lower = name.lowercase()
                     !lower.contains("tts") && !lower.contains("image") &&
@@ -32,21 +34,46 @@ class GeminiAiProvider(
                         !lower.contains("speech") && !lower.contains("audio") &&
                         !lower.contains("live") && !lower.contains("music") &&
                         !lower.contains("embedding") && !lower.contains("embed")
-                }
-                .distinct()
+                }.distinct()
+            if (candidates.isEmpty()) {
+                return@withContext AiProviderResult.Failure(
+                    AiProviderResult.Failure.Code.INVALID_CONFIGURATION,
+                    "No Gemini model available.",
+                )
+            }
             var lastFailure: AiProviderResult.Failure? = null
-            for (model in models) {
-                when (val attempt = requestWithModel(model, request)) {
+            var triedDiscovery = configured == null
+            var idx = 0
+            while (idx < candidates.size) {
+                val model = candidates[idx]
+                when (val attempt = requestWithModelWithRetry(model, request)) {
                     is AiProviderResult.Success -> return@withContext attempt
                     is AiProviderResult.Failure -> {
                         lastFailure = attempt
-                        if (!attempt.message.startsWith("Gemini HTTP 404") &&
-                            !attempt.message.startsWith("Gemini HTTP 503")
-                        ) {
+                        val is404 = attempt.message.startsWith("Gemini HTTP 404")
+                        if (is404 && !triedDiscovery) {
+                            triedDiscovery = true
+                            val discovered = discoverModels().filter { it != configured }
+                                .filter { n ->
+                                    val lower = n.lowercase()
+                                    !lower.contains("tts") && !lower.contains("image") &&
+                                        !lower.contains("imagen") && !lower.contains("veo") &&
+                                        !lower.contains("speech") && !lower.contains("audio") &&
+                                        !lower.contains("live") && !lower.contains("music") &&
+                                        !lower.contains("embedding") && !lower.contains("embed")
+                                }.distinct()
+                            if (discovered.isNotEmpty()) {
+                                candidates = candidates + discovered
+                            } else {
+                                return@withContext attempt
+                            }
+                        } else if (!is404) {
+                            // 429/5xx already retried inside; non-retryable => fail fast
                             return@withContext attempt
                         }
                     }
                 }
+                idx++
             }
             lastFailure ?: AiProviderResult.Failure(
                 AiProviderResult.Failure.Code.PROVIDER_ERROR,
@@ -81,9 +108,6 @@ class GeminiAiProvider(
                     if (!supportsGenerate) return@mapNotNull null
                     val name = model.optString("name").removePrefix("models/")
                         .takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                    // Exclude non-text models. The Gemini list endpoint reports
-                    // supportedGenerationMethods=generateContent for TTS/image models too,
-                    // but their response modalities are AUDIO/IMAGE only — they 400 on TEXT.
                     val lower = name.lowercase()
                     if (lower.contains("tts") || lower.contains("image") ||
                         lower.contains("imagen") || lower.contains("veo") ||
@@ -115,9 +139,6 @@ class GeminiAiProvider(
                 val model = models.getJSONObject(index)
                 val name = model.optString("name").removePrefix("models/")
                 if (name.isBlank()) return@mapNotNull null
-                // Exclude non-text models. The Gemini list endpoint reports
-                // supportedGenerationMethods=generateContent for TTS/image models too,
-                // but their response modalities are AUDIO/IMAGE only — they 400 on TEXT.
                 val lower = name.lowercase()
                 if (lower.contains("tts") || lower.contains("image") ||
                     lower.contains("imagen") || lower.contains("veo") ||
@@ -139,6 +160,28 @@ class GeminiAiProvider(
         }
     }.getOrDefault(emptyList())
 
+    private suspend fun requestWithModelWithRetry(
+        model: String,
+        request: AcademicExtractionRequest,
+    ): AiProviderResult {
+        var last: AiProviderResult.Failure? = null
+        repeat(3) { attempt ->
+            when (val r = requestWithModel(model, request)) {
+                is AiProviderResult.Success -> return r
+                is AiProviderResult.Failure -> {
+                    last = r
+                    val code = r.message.substringAfter("Gemini HTTP ").substringBefore(":").substringBefore(" ").toIntOrNull()
+                    val retryable = code != null && AiRetry.isRetryableStatus(code)
+                    if (!retryable || attempt == 2) return r
+                    // Extract Retry-After if present in message (provider may include it in body, but header is authoritative;
+                    // requestWithModel doesn't expose header, so use exponential backoff here)
+                    delay(AiRetry.backoffDelayMs(attempt, null))
+                }
+            }
+        }
+        return last!!
+    }
+
     private fun requestWithModel(
         model: String,
         request: AcademicExtractionRequest,
@@ -154,14 +197,13 @@ class GeminiAiProvider(
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/json")
             connection.outputStream.use { it.write(buildBody(request).toString().toByteArray()) }
-            val responseStream = if (connection.responseCode in 200..299) {
-                connection.inputStream
-            } else {
-                connection.errorStream
-            }
+            val code = connection.responseCode
+            val responseStream = if (code in 200..299) connection.inputStream else connection.errorStream
             val response = responseStream?.bufferedReader()?.use { it.readText() }.orEmpty()
-            if (connection.responseCode !in 200..299) {
-                error("Gemini HTTP ${connection.responseCode}: ${response.take(300)}")
+            if (code !in 200..299) {
+                val retryAfter = connection.getHeaderField("Retry-After")
+                val suffix = retryAfter?.let { " (Retry-After: $it)" } ?: ""
+                error("Gemini HTTP $code: ${response.take(300)}$suffix")
             }
             parseResponse(response, request.schemaVersion, model)
         } finally {
@@ -176,36 +218,10 @@ class GeminiAiProvider(
     }
 
     private fun buildBody(request: AcademicExtractionRequest): JSONObject {
-        val messages = request.messages.joinToString("\n") {
-            "[${it.timestampMillis}] ${it.jid}: ${it.text.orEmpty()}"
-        }
-        val prompt = """
-            Extract academic items and useful general conversation insights from the messages below.
-            Preserve the original language of titles and details. Do not translate.
-
-            For each item, dueAtMillis MUST be when the EVENT OCCURS, not when the message was sent.
-            - CLASS_SCHEDULE: next occurrence of the class day + start time. If the message says
-              "tomorrow 9 AM" sent on Aug 30, dueAtMillis is Aug 31 09:00. If only a day-of-week
-              is given ("Sunday 9 AM"), use the next occurrence of that day. For weekly recurring
-              schedules, pick the next upcoming instance of that weekday.
-            - ASSIGNMENT / DEADLINE: the actual submission deadline parsed from the text.
-            - EXAM / CLASS_TEST / VIVA / PRACTICAL / INTERVIEW / PRESENTATION: the event date+time.
-            - ANNOUNCEMENT / CANCELLATION: null (no event time).
-            - If truly ambiguous, set dueAtMillis to null. Do not invent facts.
-
-            Type vocabulary (use the closest match):
-            CLASS_SCHEDULE | ASSIGNMENT | EXAM | DEADLINE | ANNOUNCEMENT | CANCELLATION |
-            CLASS_TEST | PRESENTATION | VIVA | INTERVIEW | PRACTICAL
-
-            Return ONLY valid JSON matching:
-            {"items":[{"stableId":"string","type":"one of the above","title":"string","details":"string|null","subject":"string|null","dueAtMillis":0,"sourceJid":"string","sourceMessageId":0,"confidence":0.0,"extractionVersion":${request.schemaVersion}}],"insights":[{"stableId":"string","type":"PERSONAL_REMINDER|PLAN|FAMILY|FRIEND|GENERAL","title":"string","details":"string|null","sourceJid":"string","sourceMessageId":0,"confidence":0.0,"extractionVersion":${request.schemaVersion}}]}
-            Put non-academic useful information in insights. Return empty arrays when nothing is useful.
-            Messages:
-            $messages
-        """.trimIndent()
+        val prompt = AiPrompt.buildPrompt(request.messages, request.schemaVersion)
         return JSONObject()
             .put("contents", JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
-            .put("generationConfig", JSONObject().put("responseMimeType", "application/json"))
+            .put("generationConfig", JSONObject().put("responseMimeType", "application/json").put("temperature", 0))
     }
 
     private fun parseResponse(
@@ -222,59 +238,54 @@ class GeminiAiProvider(
             .getString("text")
         val json = JSONObject(text)
         val items = (json.optJSONArray("items") ?: JSONArray()).let { array ->
-            (0 until array.length()).map { index -> parseItem(array.getJSONObject(index), schemaVersion) }
+            (0 until array.length()).mapNotNull { index -> parseItem(array.getJSONObject(index), schemaVersion) }
         }
-        val validated = AcademicItemValidator.validateAll(items, schemaVersion)
-        return validated.fold(
-            onSuccess = {
-                AiProviderResult.Success(
-                    AcademicExtractionResult(
-                        items = it,
-                                insights = parseInsights(json, schemaVersion),
-                        providerId = config.providerId ?: "gemini",
-                        modelId = model,
-                        schemaVersion = schemaVersion,
-                    ),
-                )
-            },
-            onFailure = {
-                AiProviderResult.Failure(
-                    AiProviderResult.Failure.Code.INVALID_OUTPUT,
-                    it.message ?: "Gemini returned invalid academic items.",
-                    it,
-                )
-            },
+        return AiProviderResult.Success(
+            AcademicExtractionResult(
+                items = items,
+                insights = parseInsights(json, schemaVersion),
+                providerId = config.providerId ?: "gemini",
+                modelId = model,
+                schemaVersion = schemaVersion,
+            ),
         )
     }
 
-    private fun parseItem(json: JSONObject, schemaVersion: Int): AcademicItem =
+    private fun parseItem(json: JSONObject, schemaVersion: Int): AcademicItem? = try {
+        val rawType = json.getString("type").trim().uppercase()
+        val type = try { AcademicItemType.valueOf(rawType) } catch (_: IllegalArgumentException) { AcademicItemType.ANNOUNCEMENT }
         AcademicItem(
             stableId = json.getString("stableId"),
-            type = AcademicItemType.valueOf(json.getString("type")),
+            type = type,
             title = json.getString("title"),
             details = json.optString("details").takeUnless { it == "null" },
             subject = json.optString("subject").takeUnless { it == "null" },
             dueAtMillis = if (json.isNull("dueAtMillis")) null else json.optLong("dueAtMillis"),
             sourceJid = json.getString("sourceJid"),
             sourceMessageId = json.getLong("sourceMessageId"),
-            confidence = json.getDouble("confidence").toFloat(),
+            confidence = json.optDouble("confidence", 0.7).toFloat(),
             extractionVersion = schemaVersion,
         )
+    } catch (_: Exception) { null }
 
     private fun parseInsights(json: JSONObject, schemaVersion: Int): List<ConversationInsight> {
         val array = json.optJSONArray("insights") ?: return emptyList()
-        return (0 until array.length()).map { index ->
-            val item = array.getJSONObject(index)
-            ConversationInsight(
-                stableId = item.getString("stableId"),
-                type = InsightType.valueOf(item.getString("type")),
-                title = item.getString("title"),
-                details = item.optString("details").takeUnless { it == "null" },
-                sourceJid = item.getString("sourceJid"),
-                sourceMessageId = item.getLong("sourceMessageId"),
-                confidence = item.getDouble("confidence").toFloat(),
-                extractionVersion = schemaVersion,
-            )
+        return (0 until array.length()).mapNotNull { index ->
+            try {
+                val item = array.getJSONObject(index)
+                val rawType = item.getString("type").trim().uppercase()
+                val type = try { InsightType.valueOf(rawType) } catch (_: IllegalArgumentException) { InsightType.GENERAL }
+                ConversationInsight(
+                    stableId = item.getString("stableId"),
+                    type = type,
+                    title = item.getString("title"),
+                    details = item.optString("details").takeUnless { it == "null" },
+                    sourceJid = item.getString("sourceJid"),
+                    sourceMessageId = item.getLong("sourceMessageId"),
+                    confidence = item.optDouble("confidence", 0.7).toFloat(),
+                    extractionVersion = schemaVersion,
+                )
+            } catch (_: Exception) { null }
         }
     }
 }

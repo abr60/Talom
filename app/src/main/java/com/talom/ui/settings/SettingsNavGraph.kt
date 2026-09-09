@@ -40,6 +40,7 @@ import kotlinx.coroutines.delay
 
 private object SettingsRoutes {
     const val HUB = "settings/hub"
+    const val CUSTOMIZE = "settings/customize"
     const val AI = "settings/ai"
     const val WHATSAPP = "settings/whatsapp"
     const val MANAGE = "settings/manage"
@@ -55,8 +56,10 @@ fun SettingsNavGraph(
     onAiKeyChange: (String) -> Unit,
     aiModel: String,
     onAiModelChange: (String) -> Unit,
-    aiEndpoint: String,
-    onAiEndpointChange: (String) -> Unit,
+    ollamaEndpoint: String,
+    onOllamaEndpointChange: (String) -> Unit,
+    openAiEndpoint: String,
+    onOpenAiEndpointChange: (String) -> Unit,
     useOpenAiCompatible: Boolean,
     onUseOpenAiCompatibleChange: (Boolean) -> Unit,
     cloudConsent: Boolean,
@@ -87,6 +90,7 @@ fun SettingsNavGraph(
     pullState: String,
     importState: String,
     onPull: () -> Unit,
+    onForcePull: () -> Unit,
     onImport: () -> Unit,
     pullLog: List<PullLogEntity>,
     formatTime: (Long) -> String,
@@ -107,9 +111,16 @@ fun SettingsNavGraph(
     onConnectClassroom: () -> Unit,
     onSyncClassroom: () -> Unit,
 
-    // Theme + notifications
+    // Theme + notifications + preferences
     themeMode: TalomThemeMode,
     onThemeChange: (TalomThemeMode) -> Unit,
+    fontPreference: String,
+    onFontPreferenceChange: (String) -> Unit,
+    pullHour: Int,
+    pullMinute: Int,
+    onPullTimeChange: (Int, Int) -> Unit,
+    userIdentity: String,
+    onUserIdentityChange: (String) -> Unit,
     showNotificationPrompt: Boolean,
     onEnableNotifications: () -> Unit,
 
@@ -159,13 +170,24 @@ fun SettingsNavGraph(
                     themeMode = themeMode,
                     onThemeChange = onThemeChange,
                     aiMode = aiMode,
+                    providerId = if (aiMode == AiMode.CLOUD && useOpenAiCompatible) "openai_compatible" else if (aiMode == AiMode.CLOUD) "gemini" else null,
                     whitelist = whitelist,
                     classroomAccount = classroomAccount,
                     showNotificationPrompt = showNotificationPrompt,
                     onEnableNotifications = onEnableNotifications,
+                    onNavigateCustomize = { navController.navigate(SettingsRoutes.CUSTOMIZE) },
                     onNavigateAi = { navController.navigate(SettingsRoutes.AI) },
                     onNavigateWhatsApp = { navController.navigate(SettingsRoutes.WHATSAPP) },
                     onNavigateClassroom = { navController.navigate(SettingsRoutes.CLASSROOM) },
+                )
+            }
+            composable(SettingsRoutes.CUSTOMIZE) {
+                CustomizeSettingsScreen(
+                    fontPreference = fontPreference,
+                    onFontPreferenceChange = onFontPreferenceChange,
+                    userIdentity = userIdentity,
+                    onUserIdentityChange = onUserIdentityChange,
+                    onBack = { navController.popBackStack() },
                 )
             }
             composable(SettingsRoutes.AI) {
@@ -176,8 +198,10 @@ fun SettingsNavGraph(
                     onAiKeyChange = onAiKeyChange,
                     aiModel = aiModel,
                     onAiModelChange = onAiModelChange,
-                    aiEndpoint = aiEndpoint,
-                    onAiEndpointChange = onAiEndpointChange,
+                    ollamaEndpoint = ollamaEndpoint,
+                    onOllamaEndpointChange = onOllamaEndpointChange,
+                    openAiEndpoint = openAiEndpoint,
+                    onOpenAiEndpointChange = onOpenAiEndpointChange,
                     useOpenAiCompatible = useOpenAiCompatible,
                     onUseOpenAiCompatibleChange = onUseOpenAiCompatibleChange,
                     cloudConsent = cloudConsent,
@@ -211,9 +235,13 @@ fun SettingsNavGraph(
                     pullState = pullState,
                     importState = importState,
                     onPull = onPull,
+                    onForcePull = onForcePull,
                     onImport = onImport,
                     pullLog = pullLog,
                     formatTime = formatTime,
+                    pullHour = pullHour,
+                    pullMinute = pullMinute,
+                    onPullTimeChange = onPullTimeChange,
                     onManageConversations = { navController.navigate(SettingsRoutes.MANAGE) },
                     onBack = { navController.popBackStack() },
                 )

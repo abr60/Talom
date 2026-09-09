@@ -17,6 +17,7 @@ data class ConversationInsightEntity(
     val providerId: String,
     val modelId: String,
     val storedAtMillis: Long,
+    val receivedAtMillis: Long? = null,
 ) {
     fun toDomain() = ConversationInsight(
         stableId, InsightType.valueOf(type), title, details, sourceJid,
@@ -28,10 +29,12 @@ data class ConversationInsightEntity(
             insight: ConversationInsight,
             providerId: String,
             modelId: String,
+            receivedAtMillis: Long? = null,
         ) = ConversationInsightEntity(
             insight.stableId, insight.type.name, insight.title, insight.details,
             insight.sourceJid, insight.sourceMessageId, insight.confidence,
             insight.extractionVersion, providerId, modelId, System.currentTimeMillis(),
+            receivedAtMillis = receivedAtMillis,
         )
     }
 }

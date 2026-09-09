@@ -17,11 +17,26 @@ interface AcademicItemDao {
     @Query("SELECT * FROM academic_items WHERE stableId = :stableId LIMIT 1")
     suspend fun findById(stableId: String): AcademicItemEntity?
 
-    @Query("DELETE FROM academic_items WHERE dueAtMillis IS NOT NULL AND dueAtMillis < :cutoff AND type IN (:types)")
-    suspend fun deleteStaleTimeBound(cutoff: Long, types: List<String>)
+    @Query(
+        "UPDATE academic_items SET done = 1, submittedAtMillis = :submittedAtMillis WHERE stableId = :stableId",
+    )
+    suspend fun markDone(stableId: String, submittedAtMillis: Long)
+
+    @Query(
+        "DELETE FROM academic_items WHERE done = 1 AND submittedAtMillis IS NOT NULL AND submittedAtMillis < :cutoffMillis",
+    )
+    suspend fun deleteSubmittedOlderThan(cutoffMillis: Long)
+
+    @Query(
+        "DELETE FROM academic_items WHERE done = 0 AND dueAtMillis IS NOT NULL AND dueAtMillis < :dueCutoff AND storedAtMillis < :storedCutoff AND type IN (:types)",
+    )
+    suspend fun deleteStaleTimeBound(dueCutoff: Long, storedCutoff: Long, types: List<String>)
 
     @Query("DELETE FROM academic_items WHERE storedAtMillis < :cutoff AND type IN (:types)")
     suspend fun deleteOldAnnouncements(cutoff: Long, types: List<String>)
+
+    @Query("DELETE FROM academic_items WHERE sourceJid = :jid AND sourceMessageId IN (:messageIds)")
+    suspend fun deleteBySource(jid: String, messageIds: List<Long>)
 
     @Query("DELETE FROM academic_items")
     suspend fun clearAll()

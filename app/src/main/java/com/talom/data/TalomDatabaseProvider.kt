@@ -166,10 +166,18 @@ object TalomDatabaseProvider {
 
     private val MIGRATION_9_10 = object : Migration(9, 10) {
         override fun migrate(database: SupportSQLiteDatabase) {
-            // No schema change. The academic_items.type column is TEXT, so Room
-            // accepts the new enum string values (CLASS_TEST, PRESENTATION,
-            // VIVA, INTERVIEW, PRACTICAL) on next insert. Bumping the version
-            // makes Room accept these without a destructive migration.
+            database.execSQL(
+                "ALTER TABLE academic_items ADD COLUMN done INTEGER NOT NULL DEFAULT 0",
+            )
+            database.execSQL(
+                "ALTER TABLE academic_items ADD COLUMN submittedAtMillis INTEGER DEFAULT NULL",
+            )
+            database.execSQL(
+                "ALTER TABLE academic_items ADD COLUMN receivedAtMillis INTEGER DEFAULT NULL",
+            )
+            database.execSQL(
+                "ALTER TABLE conversation_insights ADD COLUMN receivedAtMillis INTEGER DEFAULT NULL",
+            )
         }
     }
 }

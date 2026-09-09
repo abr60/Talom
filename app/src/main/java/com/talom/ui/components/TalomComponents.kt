@@ -65,6 +65,53 @@ fun TalomCard(
     )
 }
 
+/** Banner for pull PARTIAL/FAILED, including validation drops. */
+@Composable
+fun PullStatusBanner(latestPullLog: com.talom.data.source.PullLogEntity?) {
+    val log = latestPullLog ?: return
+    val state = log.state
+    val hasValidationSkips = (log.skippedCount ?: 0) > 0
+    if (state != "PARTIAL" && state != "FAILED" && !hasValidationSkips) return
+    val isFailed = state == "FAILED"
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = if (isFailed) {
+            MaterialTheme.colorScheme.errorContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant
+        },
+        contentColor = if (isFailed) {
+            MaterialTheme.colorScheme.onErrorContainer
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        },
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = when {
+                    isFailed -> "Last pull failed"
+                    hasValidationSkips && state == "PARTIAL" ->
+                        "Last pull partial — ${log.skippedCount} item(s) failed validation"
+                    state == "PARTIAL" -> "Last pull partially succeeded"
+                    else -> "${log.skippedCount} item(s) failed validation"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            log.detail?.takeIf { it.isNotBlank() }?.let { detail ->
+                Text(
+                    text = detail,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+}
+
 /** Uppercase tracked monospace section header, Minimal Lift style. */
 @Composable
 fun SectionHeader(text: String) {

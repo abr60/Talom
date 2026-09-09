@@ -45,6 +45,7 @@ import androidx.work.WorkManager
 import com.talom.core.ai.AcademicExtractionService
 import com.talom.core.ai.AiMode
 import com.talom.core.ai.AiPreferences
+import com.talom.core.ai.AiPrompt
 import com.talom.core.ai.AiProviderConfig
 import com.talom.core.ai.AiProviderResult
 import com.talom.core.ai.CloudErrorMapper
@@ -119,7 +120,12 @@ class MainActivity : ComponentActivity() {
             null
         }
 
-        TalomWorkScheduler.scheduleDailyOneAm(this)
+        val talomPreferences = com.talom.core.TalomPreferences(this)
+        TalomWorkScheduler.scheduleDailyAt(
+            this,
+            hour = talomPreferences.pullHour(),
+            minute = talomPreferences.pullMinute(),
+        )
         val pullRepository = WhatsAppPullRepository(
             source = WhatsAppMessageSource(RootWhatsAppSnapshotProvider(this)),
             whitelistDao = database.whatsappWhitelistDao(),
@@ -156,8 +162,11 @@ private fun TalomApp(
     val whitelistDao = database.whatsappWhitelistDao()
     val whitelist by whitelistDao.observeAll().collectAsState(initial = emptyList())
     val pullLog by database.pullLogDao().observeRecent("whatsapp").collectAsState(initial = emptyList())
+    val latestPullLog = pullLog.firstOrNull()
     val academicItems by database.academicItemDao().observeAll().collectAsState(initial = emptyList())
     val insights by database.conversationInsightDao().observeAll().collectAsState(initial = emptyList())
+    val fromMeKeysList by database.whatsappMessageDao().observeFromMeKeys().collectAsState(initial = emptyList())
+    val fromMeKeys = remember(fromMeKeysList) { fromMeKeysList.toSet() }
     val classroomCourses by database.classroomDao().observeCourses().collectAsState(initial = emptyList())
     val classroomCoursework by database.classroomDao().observeCoursework().collectAsState(initial = emptyList())
     val classroomAnnouncements by database.classroomDao().observeAnnouncements().collectAsState(initial = emptyList())
@@ -193,26 +202,38 @@ private fun TalomApp(
         )
     }
     val aiPreferences = remember { AiPreferences(context) }
-    var aiMode by remember { mutableStateOf(aiPreferences.config().mode) }
+    val talomPreferences = remember { com.talom.core.TalomPreferences(context) }
+    val initialAiConfig = remember { aiPreferences.config() }
+    var aiMode by remember { mutableStateOf(initialAiConfig.mode) }
     var aiKey by remember { mutableStateOf("") }
     var aiModel by remember {
-        mutableStateOf(aiPreferences.config().modelId ?: "gemini-3.6-flash")
+        mutableStateOf(
+            initialAiConfig.modelId ?: if (initialAiConfig.providerId == "openai_compatible") {
+                "google/gemma-3-4b-it:free"
+            } else {
+                "gemini-3.6-flash"
+            },
+        )
     }
     var cloudConsent by remember { mutableStateOf(aiPreferences.cloudConsent()) }
     var localConsent by remember { mutableStateOf(aiPreferences.localConsent()) }
-    var aiEndpoint by remember {
-        mutableStateOf(aiPreferences.config().endpoint ?: "http://localhost:11434")
-    }
+    var ollamaEndpoint by remember { mutableStateOf(aiPreferences.ollamaEndpoint()) }
+    var openAiEndpoint by remember { mutableStateOf(aiPreferences.openAiEndpoint()) }
     var useOpenAiCompatible by remember {
-        mutableStateOf(aiPreferences.config().providerId == "openai_compatible")
+        mutableStateOf(initialAiConfig.providerId == "openai_compatible")
     }
+    var pullHour by remember { mutableIntStateOf(talomPreferences.pullHour()) }
+    var pullMinute by remember { mutableIntStateOf(talomPreferences.pullMinute()) }
+    var fontPreference by remember { mutableStateOf(talomPreferences.fontPreference()) }
+    var userIdentity by remember { mutableStateOf(talomPreferences.userIdentity()) }
     var aiSettingsState by remember {
         mutableStateOf(
-            if (aiPreferences.config().mode == AiMode.CLOUD) {
-                "Cloud Gemini is configured."
-            } else {
-                "AI is disabled."
-            },
+            com.talom.ui.settings.StatusText.aiConfigSummary(
+                aiPreferences.config(),
+                aiPreferences.apiKey()?.isNotBlank() == true,
+                aiPreferences.cloudConsent(),
+                aiPreferences.localConsent(),
+            ),
         )
     }
     var localTestState by remember { mutableStateOf("") }
@@ -238,7 +259,7 @@ private fun TalomApp(
             connectionStatus = null
         }
     }
-    LaunchedEffect(aiMode, aiKey, savedAiKey, useOpenAiCompatible, aiEndpoint, modelsRefreshKey) {
+    LaunchedEffect(aiMode, aiKey, savedAiKey, useOpenAiCompatible, openAiEndpoint, modelsRefreshKey) {
         if (aiMode != AiMode.CLOUD) return@LaunchedEffect
         val key = aiKey.ifBlank { savedAiKey }
         if (key.isBlank()) {
@@ -248,7 +269,7 @@ private fun TalomApp(
             return@LaunchedEffect
         }
         if (useOpenAiCompatible) {
-            val endpoint = aiEndpoint.trim()
+            val endpoint = openAiEndpoint.trim()
             if (endpoint.isBlank()) {
                 availableModels = emptyList()
                 modelsError = "Enter an endpoint URL to load models."
@@ -304,9 +325,9 @@ private fun TalomApp(
     var availableLocalModels by remember { mutableStateOf(emptyList<String>()) }
     var localModelsLoading by remember { mutableStateOf(false) }
     var localModelsError by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(aiMode, aiEndpoint) {
+    LaunchedEffect(aiMode, ollamaEndpoint) {
         if (aiMode != AiMode.LOCAL) return@LaunchedEffect
-        val endpoint = aiEndpoint.trim()
+        val endpoint = ollamaEndpoint.trim()
         if (endpoint.isBlank()) {
             availableLocalModels = emptyList()
             localModelsError = null
@@ -373,20 +394,19 @@ private fun TalomApp(
                     if (academicExtractionService == null) {
                         "Imported ${result.messages.size} messages; ignored ${result.ignoredLines} lines."
                     } else {
-                        val itemCount = result.messages
-                            .map {
-                                SourceMessage(
-                                    messageId = stableExportMessageId(it.stableId),
-                                    chatId = 0L,
-                                    jid = "whatsapp-export",
-                                    chatSubject = null,
-                                    fromMe = false,
-                                    timestampMillis = it.timestampMillis,
-                                    messageType = 0,
-                                    text = it.text,
-                                )
-                            }
-                            .chunked(50)
+                        val exportSourceMessages = result.messages.map {
+                            SourceMessage(
+                                messageId = stableExportMessageId(it.stableId),
+                                chatId = 0L,
+                                jid = "whatsapp-export",
+                                chatSubject = null,
+                                fromMe = false,
+                                timestampMillis = it.timestampMillis,
+                                messageType = 0,
+                                text = it.text,
+                            )
+                        }.filter { !it.text.isNullOrBlank() }
+                        val itemCount = AiPrompt.chunkByTokens(exportSourceMessages)
                             .sumOf { batch ->
                                 when (val extraction = academicExtractionService.extract(batch)) {
                                     is AiProviderResult.Failure ->
@@ -523,29 +543,36 @@ private fun TalomApp(
                             announcements = classroomAnnouncements,
                             classroomStatus = classroomStatus,
                             formatTime = ::formatTime,
-                            onClearAll = {
-                                scope.launch { academicItemRepository.clearAll() }
+                            onMarkDone = { stableId ->
+                                scope.launch {
+                                    academicItemRepository.markDone(stableId)
+                                }
                             },
+                            latestPullLog = latestPullLog,
                         )
                         1 -> {
                             PersonalScreen(
                                 insights = insights,
                                 whitelist = whitelist,
                                 directory = directory,
+                                fromMeKeys = fromMeKeys,
+                                latestPullLog = latestPullLog,
                             )
                         }
                         else -> {
                             val doSaveAi: () -> Unit = {
-                                if (aiMode == AiMode.CLOUD && !cloudConsent) {
-                                    aiSettingsState = "Enable consent before using Cloud AI."
-                                } else if (aiMode == AiMode.LOCAL && !localConsent) {
-                                    aiSettingsState = "Enable local-network consent before using Ollama."
-                                } else if (aiMode == AiMode.CLOUD && useOpenAiCompatible &&
-                                    (aiKey.isBlank() && savedAiKey.isBlank() ||
-                                        aiEndpoint.trim().isBlank() ||
-                                        aiModel.trim().isBlank())
-                                ) {
-                                    aiSettingsState = "Endpoint, API key, and model are all required for OpenAI-compatible."
+                                val activeEndpoint = if (aiMode == AiMode.LOCAL) ollamaEndpoint.trim() else if (useOpenAiCompatible) openAiEndpoint.trim() else ""
+                                val missing = com.talom.ui.settings.StatusText.aiMissingFields(
+                                    mode = aiMode,
+                                    useOpenAiCompatible = useOpenAiCompatible,
+                                    endpointBlank = if (aiMode == AiMode.LOCAL || useOpenAiCompatible) activeEndpoint.isBlank() else false,
+                                    keyBlank = aiKey.isBlank() && savedAiKey.isBlank(),
+                                    modelBlank = aiModel.trim().isBlank(),
+                                    cloudConsent = cloudConsent,
+                                    localConsent = localConsent,
+                                )
+                                if (missing != null) {
+                                    aiSettingsState = missing
                                 } else {
                                     aiPreferences.setConfig(
                                         AiProviderConfig(
@@ -557,8 +584,8 @@ private fun TalomApp(
                                             },
                                             modelId = if (aiMode != AiMode.DISABLED) aiModel.trim() else null,
                                             endpoint = when (aiMode) {
-                                                AiMode.CLOUD -> if (useOpenAiCompatible) aiEndpoint.trim() else null
-                                                AiMode.LOCAL -> aiEndpoint.trim()
+                                                AiMode.CLOUD -> if (useOpenAiCompatible) openAiEndpoint.trim() else null
+                                                AiMode.LOCAL -> ollamaEndpoint.trim()
                                                 AiMode.DISABLED -> null
                                             },
                                         ),
@@ -571,15 +598,13 @@ private fun TalomApp(
                                         aiPreferences.setCloudConsent(cloudConsent)
                                         aiPreferences.setLocalConsent(localConsent)
                                     }.onSuccess {
-                                        aiSettingsState = when (aiMode) {
-                                            AiMode.DISABLED -> "AI disabled."
-                                            AiMode.CLOUD -> if (useOpenAiCompatible) {
-                                                "OpenAI-compatible settings saved."
-                                            } else {
-                                                "Cloud Gemini settings saved securely."
-                                            }
-                                            AiMode.LOCAL -> "Local Ollama settings saved."
-                                        }
+                                        val savedCfg = aiPreferences.config()
+                                        aiSettingsState = com.talom.ui.settings.StatusText.aiSaveFeedback(
+                                            savedCfg,
+                                            aiPreferences.apiKey()?.isNotBlank() == true,
+                                            aiPreferences.cloudConsent(),
+                                            aiPreferences.localConsent(),
+                                        )
                                         (context as? android.app.Activity)?.recreate()
                                     }.onFailure {
                                         aiSettingsState = "Could not secure the API key: ${it.message ?: "unknown error"}"
@@ -594,7 +619,7 @@ private fun TalomApp(
                                             mode = AiMode.LOCAL,
                                             providerId = "ollama",
                                             modelId = aiModel.trim(),
-                                            endpoint = aiEndpoint.trim(),
+                                            endpoint = ollamaEndpoint.trim(),
                                         ),
                                     ).testConnection()
                                         .onSuccess { models ->
@@ -606,7 +631,7 @@ private fun TalomApp(
                                 }
                             }
                             val doTestConnection: () -> Unit = run@{
-                                if (aiEndpoint.trim().isBlank() ||
+                                if (openAiEndpoint.trim().isBlank() ||
                                     (aiKey.isBlank() && savedAiKey.isBlank())
                                 ) {
                                     connectionStatus = ConnectionStatus.Failed(
@@ -627,16 +652,16 @@ private fun TalomApp(
                                                 mode = AiMode.CLOUD,
                                                 providerId = "openai_compatible",
                                                 modelId = effectiveModel,
-                                                endpoint = aiEndpoint.trim(),
+                                                endpoint = openAiEndpoint.trim(),
                                             ),
                                             effectiveKey,
                                         ).testConnection().getOrElse { ConnectionStatus.Failed(
-                                            com.talom.core.ai.CloudErrorMapper.mapException(it, aiEndpoint.trim())
+                                            com.talom.core.ai.CloudErrorMapper.mapException(it, openAiEndpoint.trim())
                                         ) }
                                         connectionStatus = status
                                         if (status is ConnectionStatus.Ok && effectiveModel == null && availableModels.isNotEmpty()) {
                                             val recommended = ModelRecommender.recommend(
-                                                endpoint = aiEndpoint.trim(),
+                                                endpoint = openAiEndpoint.trim(),
                                                 apiKey = effectiveKey,
                                                 candidates = availableModels,
                                                 candidateModel = availableModels.first(),
@@ -648,7 +673,7 @@ private fun TalomApp(
                                                         mode = aiMode,
                                                         providerId = "openai_compatible",
                                                         modelId = it,
-                                                        endpoint = aiEndpoint.trim(),
+                                                        endpoint = openAiEndpoint.trim(),
                                                     )
                                                 )
                                             }
@@ -669,10 +694,26 @@ private fun TalomApp(
                                 onAiKeyChange = { aiKey = it },
                                 aiModel = aiModel,
                                 onAiModelChange = { aiModel = it },
-                                aiEndpoint = aiEndpoint,
-                                onAiEndpointChange = { aiEndpoint = it },
+                                ollamaEndpoint = ollamaEndpoint,
+                                onOllamaEndpointChange = { ollamaEndpoint = it },
+                                openAiEndpoint = openAiEndpoint,
+                                onOpenAiEndpointChange = { openAiEndpoint = it },
                                 useOpenAiCompatible = useOpenAiCompatible,
-                                onUseOpenAiCompatibleChange = { useOpenAiCompatible = it },
+                                onUseOpenAiCompatibleChange = {
+                                    useOpenAiCompatible = it
+                                    if (it) {
+                                        if (openAiEndpoint.isBlank() ||
+                                            openAiEndpoint.contains("localhost") ||
+                                            openAiEndpoint.contains("127.0.0.1")
+                                        ) {
+                                            openAiEndpoint = "https://openrouter.ai/api/v1"
+                                        }
+                                        // Ollama model id won't work on OpenRouter — clear for re-pick.
+                                        if (aiModel.contains(":") && !aiModel.contains("/")) {
+                                            aiModel = ""
+                                        }
+                                    }
+                                },
                                 cloudConsent = cloudConsent,
                                 onCloudConsentChange = { cloudConsent = it },
                                 localConsent = localConsent,
@@ -705,14 +746,64 @@ private fun TalomApp(
                                     pulling = true
                                     pullState = "Creating local WhatsApp snapshot..."
                                     scope.launch {
-                                        val result = pullRepository.pull()
+                                        val result = pullRepository.pull(force = false)
                                         pulling = false
+                                        val providerLabel = aiPreferences.config().let { cfg ->
+                                            when (cfg.mode) {
+                                                AiMode.DISABLED -> null
+                                                AiMode.LOCAL -> "${cfg.providerId ?: "ollama"}/${cfg.modelId ?: "?"}"
+                                                AiMode.CLOUD -> "${cfg.providerId ?: "cloud"}/${cfg.modelId ?: "?"}"
+                                            }
+                                        }
                                         pullState = result.fold(
                                             onSuccess = {
-                                                if (it.extractedCount == 0) "Pull complete: no new messages; Gemini was not called."
-                                                else "Pull complete: ${it.extractedCount} new messages processed."
+                                                com.talom.ui.settings.StatusText.pullResult(
+                                                    extracted = it.extractedCount,
+                                                    acad = it.academicItemCount,
+                                                    ins = it.insightCount,
+                                                    windowDays = aiPreferences.messageWindowDays(),
+                                                    force = false,
+                                                    providerLabel = providerLabel,
+                                                    noNewMessagesCursorMillis = it.nextCursor?.timestampMillis,
+                                                )
                                             },
-                                            onFailure = { "Pull failed: ${it.message ?: "Unknown error"}" },
+                                            onFailure = {
+                                                com.talom.ui.settings.StatusText.pullFailure(
+                                                    it.message ?: "Unknown error", force = false,
+                                                )
+                                            },
+                                        )
+                                    }
+                                },
+                                onForcePull = {
+                                    pulling = true
+                                    pullState = "Re-extracting last ${aiPreferences.messageWindowDays()}d with AI..."
+                                    scope.launch {
+                                        val result = pullRepository.pull(force = true)
+                                        pulling = false
+                                        val providerLabel = aiPreferences.config().let { cfg ->
+                                            when (cfg.mode) {
+                                                AiMode.DISABLED -> null
+                                                AiMode.LOCAL -> "${cfg.providerId ?: "ollama"}/${cfg.modelId ?: "?"}"
+                                                AiMode.CLOUD -> "${cfg.providerId ?: "cloud"}/${cfg.modelId ?: "?"}"
+                                            }
+                                        }
+                                        pullState = result.fold(
+                                            onSuccess = {
+                                                com.talom.ui.settings.StatusText.pullResult(
+                                                    extracted = it.extractedCount,
+                                                    acad = it.academicItemCount,
+                                                    ins = it.insightCount,
+                                                    windowDays = aiPreferences.messageWindowDays(),
+                                                    force = true,
+                                                    providerLabel = providerLabel,
+                                                )
+                                            },
+                                            onFailure = {
+                                                com.talom.ui.settings.StatusText.pullFailure(
+                                                    it.message ?: "Unknown error", force = true,
+                                                )
+                                            },
                                         )
                                     }
                                 },
@@ -769,6 +860,24 @@ private fun TalomApp(
                                     themeMode = it
                                     context.getSharedPreferences("talom_preferences", android.content.Context.MODE_PRIVATE)
                                         .edit().putString("theme_mode", it.name).apply()
+                                },
+                                fontPreference = fontPreference,
+                                onFontPreferenceChange = {
+                                    fontPreference = it
+                                    talomPreferences.setFontPreference(it)
+                                },
+                                pullHour = pullHour,
+                                pullMinute = pullMinute,
+                                onPullTimeChange = { hour, minute ->
+                                    pullHour = hour
+                                    pullMinute = minute
+                                    talomPreferences.setPullTime(hour, minute)
+                                    TalomWorkScheduler.scheduleDailyAt(context, hour, minute)
+                                },
+                                userIdentity = userIdentity,
+                                onUserIdentityChange = {
+                                    userIdentity = it
+                                    talomPreferences.setUserIdentity(it)
                                 },
                                 showNotificationPrompt = showNotificationPrompt,
                                 onEnableNotifications = { notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) },

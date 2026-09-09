@@ -1,11 +1,11 @@
 package com.talom.core.ai
 
-import com.talom.core.source.SourceMessage
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /**
@@ -45,14 +45,25 @@ class OpenAiCompatibleAiProvider(
             )
         }
         return withContext(Dispatchers.IO) {
-            runCatching { requestWithModel(config.modelId, request) }
-                .getOrElse {
-                    AiProviderResult.Failure(
-                        AiProviderResult.Failure.Code.PROVIDER_ERROR,
-                        it.message ?: "Request failed.",
-                        it,
-                    )
-                }
+            var last: AiProviderResult.Failure? = null
+            repeat(3) { attempt ->
+                val r = runCatching { requestWithModel(config.modelId!!, request) }
+                    .getOrElse {
+                        AiProviderResult.Failure(
+                            AiProviderResult.Failure.Code.PROVIDER_ERROR,
+                            it.message ?: "Request failed.",
+                            it,
+                        )
+                    }
+                if (r is AiProviderResult.Success) return@withContext r
+                last = r as AiProviderResult.Failure
+                val code = extractHttpCode(r.message)
+                val retryable = code != null && AiRetry.isRetryableStatus(code)
+                if (!retryable || attempt == 2) return@withContext r
+                val retryAfter = Regex("""Retry-After:\s*([^\s\)]+)""").find(r.message)?.groupValues?.getOrNull(1)
+                delay(AiRetry.backoffDelayMs(attempt, retryAfter))
+            }
+            last!!
         }
     }
 
@@ -159,76 +170,102 @@ class OpenAiCompatibleAiProvider(
         model: String,
         request: AcademicExtractionRequest,
     ): AiProviderResult {
-        val url = URL("$baseUrl/chat/completions")
-        val connection = url.openConnection() as HttpURLConnection
-        return try {
-            connection.requestMethod = "POST"
-            connection.connectTimeout = 15_000
-            connection.readTimeout = 60_000
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/json")
-            connection.setRequestProperty("Authorization", "Bearer $apiKey")
-            connection.outputStream.use { it.write(buildBody(request, model).toString().toByteArray()) }
-            val stream = if (connection.responseCode in 200..299) {
-                connection.inputStream
-            } else {
-                connection.errorStream
+        // Try with response_format=json_object first; retry without it if the endpoint rejects it.
+        val attempts = listOf(true, false).distinct()
+        for ((idx, useJsonMode) in attempts.withIndex()) {
+            val body = buildBody(request, model, useJsonMode)
+            val url = URL("$baseUrl/chat/completions")
+            val connection = url.openConnection() as HttpURLConnection
+            try {
+                connection.requestMethod = "POST"
+                connection.connectTimeout = 15_000
+                connection.readTimeout = 60_000
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.setRequestProperty("Authorization", "Bearer $apiKey")
+                connection.outputStream.use { it.write(body.toString().toByteArray()) }
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val response = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                if (code !in 200..299) {
+                    if (useJsonMode && isResponseFormatUnsupported(response) && idx == 0) continue
+                    val err = CloudErrorMapper.mapHttp(code, response, baseUrl, model)
+                    val retryAfter = connection.getHeaderField("Retry-After")
+                    val suffix = retryAfter?.let { " (Retry-After: $it)" } ?: ""
+                    return AiProviderResult.Failure(
+                        AiProviderResult.Failure.Code.PROVIDER_ERROR,
+                        "${err.headline}${err.suggestion?.let { " — $it" } ?: ""} (HTTP $code$suffix)",
+                        IllegalStateException(err.technical + suffix),
+                    )
+                }
+                val first = parseResponse(response, request.schemaVersion, model)
+                if (first is AiProviderResult.Success) return first
+                // Retry once on malformed JSON with an explicit nudge prompt.
+                val failure = first as AiProviderResult.Failure
+                if (failure.code == AiProviderResult.Failure.Code.INVALID_OUTPUT) {
+                    val nudgeBody = buildBody(
+                        request.copy(messages = request.messages),
+                        model,
+                        useJsonMode,
+                    ).apply {
+                        val msgs = getJSONArray("messages")
+                        val original = msgs.getJSONObject(0).getString("content")
+                        msgs.getJSONObject(0).put("content", buildRetryPrompt(original))
+                    }
+                    val retryConn = URL("$baseUrl/chat/completions").openConnection() as HttpURLConnection
+                    try {
+                        retryConn.requestMethod = "POST"
+                        retryConn.connectTimeout = 15_000
+                        retryConn.readTimeout = 60_000
+                        retryConn.doOutput = true
+                        retryConn.setRequestProperty("Content-Type", "application/json")
+                        retryConn.setRequestProperty("Authorization", "Bearer $apiKey")
+                        retryConn.outputStream.use { it.write(nudgeBody.toString().toByteArray()) }
+                        val rc = retryConn.responseCode
+                        val rs = if (rc in 200..299) retryConn.inputStream else retryConn.errorStream
+                        val rt = rs?.bufferedReader()?.use { it.readText() }.orEmpty()
+                        if (rc in 200..299) {
+                            val second = parseResponse(rt, request.schemaVersion, model)
+                            if (second is AiProviderResult.Success) return second
+                        }
+                    } finally {
+                        retryConn.disconnect()
+                    }
+                }
+                return first
+            } finally {
+                connection.disconnect()
             }
-            val response = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-            if (connection.responseCode !in 200..299) {
-                val err = CloudErrorMapper.mapHttp(
-                    connection.responseCode,
-                    response,
-                    baseUrl,
-                    model,
-                )
-                return AiProviderResult.Failure(
-                    AiProviderResult.Failure.Code.PROVIDER_ERROR,
-                    "${err.headline}${err.suggestion?.let { " — $it" } ?: ""}",
-                    IllegalStateException(err.technical),
-                )
-            }
-            parseResponse(response, request.schemaVersion, model)
-        } finally {
-            connection.disconnect()
         }
+        return AiProviderResult.Failure(
+            AiProviderResult.Failure.Code.PROVIDER_ERROR,
+            "Request failed.",
+        )
     }
 
-    private fun buildBody(request: AcademicExtractionRequest, model: String): JSONObject {
-        val messages = request.messages.joinToString("\n") {
-            "[${it.timestampMillis}] ${it.jid}: ${it.text.orEmpty()}"
-        }
-        val prompt = """
-            Extract academic items and useful general conversation insights from the messages below.
-            Preserve the original language of titles and details. Do not translate.
+    private fun extractHttpCode(msg: String): Int? =
+        Regex("""HTTP\s+(\d{3})""").find(msg)?.groupValues?.getOrNull(1)?.toIntOrNull()
 
-            For each item, dueAtMillis MUST be when the EVENT OCCURS, not when the message was sent.
-            - CLASS_SCHEDULE: next occurrence of the class day + start time. If the message says
-              "tomorrow 9 AM" sent on Aug 30, dueAtMillis is Aug 31 09:00. If only a day-of-week
-              is given ("Sunday 9 AM"), use the next occurrence of that day. For weekly recurring
-              schedules, pick the next upcoming instance of that weekday.
-            - ASSIGNMENT / DEADLINE: the actual submission deadline parsed from the text.
-            - EXAM / CLASS_TEST / VIVA / PRACTICAL / INTERVIEW / PRESENTATION: the event date+time.
-            - ANNOUNCEMENT / CANCELLATION: null (no event time).
-            - If truly ambiguous, set dueAtMillis to null. Do not invent facts.
-
-            Type vocabulary (use the closest match):
-            CLASS_SCHEDULE | ASSIGNMENT | EXAM | DEADLINE | ANNOUNCEMENT | CANCELLATION |
-            CLASS_TEST | PRESENTATION | VIVA | INTERVIEW | PRACTICAL
-
-            Return ONLY valid JSON matching:
-            {"items":[{"stableId":"string","type":"one of the above","title":"string","details":"string|null","subject":"string|null","dueAtMillis":0,"sourceJid":"string","sourceMessageId":0,"confidence":0.0,"extractionVersion":${request.schemaVersion}}],"insights":[{"stableId":"string","type":"PERSONAL_REMINDER|PLAN|FAMILY|FRIEND|GENERAL","title":"string","details":"string|null","sourceJid":"string","sourceMessageId":0,"confidence":0.0,"extractionVersion":${request.schemaVersion}}]}
-            Put non-academic useful information in insights. Return empty arrays when nothing is useful.
-            Messages:
-            $messages
-        """.trimIndent()
-        return JSONObject()
+    private fun buildBody(
+        request: AcademicExtractionRequest,
+        model: String,
+        useJsonMode: Boolean = true,
+    ): JSONObject {
+        val prompt = AiPrompt.buildPrompt(request.messages, request.schemaVersion)
+        val body = JSONObject()
             .put("model", model)
-            .put("messages", JSONArray().put(JSONObject()
-                .put("role", "user")
-                .put("content", prompt)))
+            .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
             .put("temperature", 0)
+        if (useJsonMode) body.put("response_format", JSONObject().put("type", "json_object"))
+        return body
     }
+
+    private fun isResponseFormatUnsupported(response: String): Boolean =
+        response.contains("response_format", ignoreCase = true) &&
+            (response.contains("unsupported", ignoreCase = true) || response.contains("not supported", ignoreCase = true))
+
+    private fun buildRetryPrompt(original: String): String =
+        "$original\n\nYour previous reply was not valid JSON. Respond now with ONLY a single JSON object — no prose, no markdown fences, no explanation."
 
     private fun parseResponse(
         response: String,
@@ -265,61 +302,54 @@ class OpenAiCompatibleAiProvider(
             )
         }
         val items = (inner.optJSONArray("items") ?: JSONArray()).let { array ->
-            (0 until array.length()).map { index -> parseItem(array.getJSONObject(index), schemaVersion) }
+            (0 until array.length()).mapNotNull { index -> parseItem(array.getJSONObject(index), schemaVersion) }
         }
-        val validated = AcademicItemValidator.validateAll(items, schemaVersion)
-        return validated.fold(
-            onSuccess = {
-                AiProviderResult.Success(
-                    AcademicExtractionResult(
-                        items = it,
-                        insights = parseInsights(inner, schemaVersion),
-                        providerId = config.providerId ?: "openai_compatible",
-                        modelId = model,
-                        schemaVersion = schemaVersion,
-                    ),
-                )
-            },
-            onFailure = {
-                AiProviderResult.Failure(
-                    AiProviderResult.Failure.Code.INVALID_OUTPUT,
-                    it.message ?: "Provider returned invalid academic items.",
-                    it,
-                )
-            },
+        return AiProviderResult.Success(
+            AcademicExtractionResult(
+                items = items,
+                insights = parseInsights(inner, schemaVersion),
+                providerId = config.providerId ?: "openai_compatible",
+                modelId = model,
+                schemaVersion = schemaVersion,
+            ),
         )
     }
 
-    private fun parseItem(json: JSONObject, schemaVersion: Int): AcademicItem =
+    private fun parseItem(json: JSONObject, schemaVersion: Int): AcademicItem? = try {
+        val rawType = json.optString("type").trim().uppercase()
+        val type = try { AcademicItemType.valueOf(rawType) } catch (_: IllegalArgumentException) { AcademicItemType.ANNOUNCEMENT }
         AcademicItem(
-            stableId = json.getString("stableId"),
-            type = AcademicItemType.valueOf(json.getString("type")),
-            title = json.getString("title"),
+            stableId = json.optString("stableId"),
+            type = type,
+            title = json.optString("title"),
             details = json.optString("details").takeUnless { it == "null" || it.isEmpty() },
             subject = json.optString("subject").takeUnless { it == "null" || it.isEmpty() },
             dueAtMillis = if (json.isNull("dueAtMillis")) null else json.optLong("dueAtMillis"),
-            sourceJid = json.getString("sourceJid"),
-            sourceMessageId = json.getLong("sourceMessageId"),
-            confidence = json.getDouble("confidence").toFloat(),
+            sourceJid = json.optString("sourceJid"),
+            sourceMessageId = json.optLong("sourceMessageId", 0L),
+            confidence = json.optDouble("confidence", 0.7).toFloat(),
             extractionVersion = schemaVersion,
         )
+    } catch (_: Exception) { null }
 
     private fun parseInsights(json: JSONObject, schemaVersion: Int): List<ConversationInsight> {
         val array = json.optJSONArray("insights") ?: return emptyList()
         return (0 until array.length()).mapNotNull { index ->
-            val item = array.optJSONObject(index) ?: return@mapNotNull null
-            val type = runCatching { InsightType.valueOf(item.optString("type")) }.getOrNull()
-                ?: return@mapNotNull null
-            ConversationInsight(
-                stableId = item.optString("stableId"),
-                type = type,
-                title = item.optString("title"),
-                details = item.optString("details").takeUnless { it == "null" || it.isEmpty() },
-                sourceJid = item.optString("sourceJid"),
-                sourceMessageId = item.optLong("sourceMessageId", 0L),
-                confidence = item.optDouble("confidence", 0.0).toFloat(),
-                extractionVersion = schemaVersion,
-            )
+            try {
+                val item = array.optJSONObject(index) ?: return@mapNotNull null
+                val rawType = item.optString("type").trim().uppercase()
+                val type = try { InsightType.valueOf(rawType) } catch (_: IllegalArgumentException) { InsightType.GENERAL }
+                ConversationInsight(
+                    stableId = item.optString("stableId"),
+                    type = type,
+                    title = item.optString("title"),
+                    details = item.optString("details").takeUnless { it == "null" || it.isEmpty() },
+                    sourceJid = item.optString("sourceJid"),
+                    sourceMessageId = item.optLong("sourceMessageId", 0L),
+                    confidence = item.optDouble("confidence", 0.0).toFloat(),
+                    extractionVersion = schemaVersion,
+                )
+            } catch (_: Exception) { null }
         }
     }
 

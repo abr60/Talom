@@ -99,18 +99,11 @@ class OllamaAiProvider(
     }
 
     private fun buildBody(request: AcademicExtractionRequest, model: String): JSONObject {
-        val messages = request.messages.joinToString("\n") {
-            "[${it.timestampMillis}] ${it.jid}: ${it.text.orEmpty()}"
-        }
-        val prompt = """
-            Extract academic items and useful general conversation insights from the messages below.
-            Return ONLY valid JSON matching:
-            {"items":[{"stableId":"string","type":"CLASS_SCHEDULE|ASSIGNMENT|EXAM|DEADLINE|ANNOUNCEMENT|CANCELLATION","title":"string","details":"string|null","subject":"string|null","dueAtMillis":0,"sourceJid":"string","sourceMessageId":0,"confidence":0.0,"extractionVersion":${request.schemaVersion}}],"insights":[{"stableId":"string","type":"PERSONAL_REMINDER|PLAN|FAMILY|FRIEND|GENERAL","title":"string","details":"string|null","sourceJid":"string","sourceMessageId":0,"confidence":0.0,"extractionVersion":${request.schemaVersion}}]}
-            Use null for unknown dueAtMillis. Do not invent facts.
-            Put non-academic useful information in insights. Return empty arrays when nothing is useful.
-            Messages:
-            $messages
-        """.trimIndent()
+        val prompt = AiPrompt.buildPrompt(
+            request.messages,
+            request.schemaVersion,
+            useExamples = false,
+        )
         return JSONObject()
             .put("model", model)
             .put("prompt", prompt)
@@ -121,8 +114,8 @@ class OllamaAiProvider(
                 "options",
                 JSONObject()
                     .put("temperature", 0)
-                    .put("num_predict", 768)
-                    .put("num_ctx", 4096),
+                    .put("num_predict", 1536)
+                    .put("num_ctx", 8192),
             )
     }
 
@@ -134,58 +127,54 @@ class OllamaAiProvider(
         val text = JSONObject(response).getString("response")
         val json = JSONObject(text)
         val items = (json.optJSONArray("items") ?: JSONArray()).let { array ->
-            (0 until array.length()).map { parseItem(array.getJSONObject(it), schemaVersion) }
+            (0 until array.length()).mapNotNull { parseItem(array.getJSONObject(it), schemaVersion) }
         }
-        val validated = AcademicItemValidator.validateAll(items, schemaVersion)
-        return validated.fold(
-            onSuccess = {
-                AiProviderResult.Success(
-                    AcademicExtractionResult(
-                        items = it,
-                        insights = parseInsights(json, schemaVersion),
-                        providerId = config.providerId ?: "ollama",
-                        modelId = model,
-                        schemaVersion = schemaVersion,
-                    ),
-                )
-            },
-            onFailure = {
-                AiProviderResult.Failure(
-                    AiProviderResult.Failure.Code.INVALID_OUTPUT,
-                    it.message ?: "Ollama returned invalid academic items.",
-                    it,
-                )
-            },
+        return AiProviderResult.Success(
+            AcademicExtractionResult(
+                items = items,
+                insights = parseInsights(json, schemaVersion),
+                providerId = config.providerId ?: "ollama",
+                modelId = model,
+                schemaVersion = schemaVersion,
+            ),
         )
     }
 
-    private fun parseItem(json: JSONObject, schemaVersion: Int) = AcademicItem(
-        stableId = json.getString("stableId"),
-        type = AcademicItemType.valueOf(json.getString("type")),
-        title = json.getString("title"),
-        details = json.optString("details").takeUnless { it == "null" },
-        subject = json.optString("subject").takeUnless { it == "null" },
-        dueAtMillis = if (json.isNull("dueAtMillis")) null else json.optLong("dueAtMillis"),
-        sourceJid = json.getString("sourceJid"),
-        sourceMessageId = json.getLong("sourceMessageId"),
-        confidence = json.getDouble("confidence").toFloat(),
-        extractionVersion = schemaVersion,
-    )
+    private fun parseItem(json: JSONObject, schemaVersion: Int): AcademicItem? = try {
+        val rawType = json.getString("type").trim().uppercase()
+        val type = try { AcademicItemType.valueOf(rawType) } catch (_: IllegalArgumentException) { AcademicItemType.ANNOUNCEMENT }
+        AcademicItem(
+            stableId = json.getString("stableId"),
+            type = type,
+            title = json.getString("title"),
+            details = json.optString("details").takeUnless { it == "null" },
+            subject = json.optString("subject").takeUnless { it == "null" },
+            dueAtMillis = if (json.isNull("dueAtMillis")) null else json.optLong("dueAtMillis"),
+            sourceJid = json.getString("sourceJid"),
+            sourceMessageId = json.getLong("sourceMessageId"),
+            confidence = json.optDouble("confidence", 0.7).toFloat(),
+            extractionVersion = schemaVersion,
+        )
+    } catch (_: Exception) { null }
 
     private fun parseInsights(json: JSONObject, schemaVersion: Int): List<ConversationInsight> {
         val array = json.optJSONArray("insights") ?: return emptyList()
-        return (0 until array.length()).map { index ->
-            val item = array.getJSONObject(index)
-            ConversationInsight(
-                stableId = item.getString("stableId"),
-                type = InsightType.valueOf(item.getString("type")),
-                title = item.getString("title"),
-                details = item.optString("details").takeUnless { it == "null" },
-                sourceJid = item.getString("sourceJid"),
-                sourceMessageId = item.getLong("sourceMessageId"),
-                confidence = item.getDouble("confidence").toFloat(),
-                extractionVersion = schemaVersion,
-            )
+        return (0 until array.length()).mapNotNull { index ->
+            try {
+                val item = array.getJSONObject(index)
+                val rawType = item.getString("type").trim().uppercase()
+                val type = try { InsightType.valueOf(rawType) } catch (_: IllegalArgumentException) { InsightType.GENERAL }
+                ConversationInsight(
+                    stableId = item.getString("stableId"),
+                    type = type,
+                    title = item.getString("title"),
+                    details = item.optString("details").takeUnless { it == "null" },
+                    sourceJid = item.getString("sourceJid"),
+                    sourceMessageId = item.getLong("sourceMessageId"),
+                    confidence = item.optDouble("confidence", 0.7).toFloat(),
+                    extractionVersion = schemaVersion,
+                )
+            } catch (_: Exception) { null }
         }
     }
 }

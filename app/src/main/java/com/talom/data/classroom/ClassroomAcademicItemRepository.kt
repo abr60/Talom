@@ -23,7 +23,7 @@ class ClassroomAcademicItemRepository(
                 )
             },
             expectedVersion = extractionVersion,
-        ).getOrThrow()
+        ).valid
         dao.upsertAll(
             validated.map {
                 AcademicItemEntity.fromDomain(
