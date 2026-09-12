@@ -34,7 +34,17 @@ android {
 
     signingConfigs {
         create("release") {
-            val storeFilePath = file("talom-release.keystore")
+            // Centralized keystore: ~/.keystores/central-release.keystore (shared across all your apps)
+            // Each app uses its own alias (dena, talom, …) with same store password. Falls back to local file.
+            val centralPath = (project.findProperty("CENTRAL_RELEASE_STORE_FILE") as String?)
+                ?: System.getenv("CENTRAL_RELEASE_STORE_FILE")
+                ?: "${System.getProperty("user.home")}/.keystores/central-release.keystore"
+            val centralFile = file(centralPath)
+            val localFile = file("talom-release.keystore")
+            val storeFilePath = when {
+                centralFile.exists() -> centralFile
+                else -> localFile
+            }
             if (storeFilePath.exists()) {
                 storeFile = storeFilePath
                 storePassword = (project.findProperty("TALOM_RELEASE_STORE_PASSWORD") as String?)
