@@ -24,11 +24,20 @@ class TalomPreferences(context: Context) {
     }
 
     fun fontPreference(): String =
-        prefs.getString(KEY_FONT, FONT_APP_DEFAULT) ?: FONT_APP_DEFAULT
+        prefs.getString(KEY_FONT, FONT_SYSTEM_DEFAULT) ?: FONT_SYSTEM_DEFAULT
 
     fun setFontPreference(value: String) {
         prefs.edit().putString(KEY_FONT, value).apply()
     }
+
+    fun isFollowSystemTheme(): Boolean = prefs.getBoolean(KEY_FOLLOW_SYSTEM_THEME, true)
+    fun setFollowSystemTheme(v: Boolean) { prefs.edit().putBoolean(KEY_FOLLOW_SYSTEM_THEME, v).apply() }
+
+    fun isDynamicColorsEnabled(): Boolean = prefs.getBoolean(KEY_DYNAMIC_COLORS, false)
+    fun setDynamicColorsEnabled(v: Boolean) { prefs.edit().putBoolean(KEY_DYNAMIC_COLORS, v).apply() }
+
+    fun isUnlocked(): Boolean = prefs.getBoolean(KEY_UNLOCKED, false)
+    fun setUnlocked(v: Boolean) { prefs.edit().putBoolean(KEY_UNLOCKED, v).apply() }
 
     fun userIdentity(): String = prefs.getString(KEY_USER_IDENTITY, "") ?: ""
 
@@ -43,6 +52,9 @@ class TalomPreferences(context: Context) {
         const val KEY_PULL_MINUTE = "pull_minute"
         const val KEY_FONT = "font_preference"
         const val KEY_USER_IDENTITY = "user_identity"
+        const val KEY_FOLLOW_SYSTEM_THEME = "follow_system_theme"
+        const val KEY_DYNAMIC_COLORS = "dynamic_colors"
+        const val KEY_UNLOCKED = "unlocked"
         const val FONT_APP_DEFAULT = "app_default"
         const val FONT_SYSTEM_DEFAULT = "system_default"
         const val DEFAULT_PULL_HOUR = 22

@@ -35,7 +35,6 @@ import com.talom.data.source.SourceStatusEntity
 import com.talom.data.whatsapp.RelationCategory
 import com.talom.data.whatsapp.WhatsAppWhitelist
 import com.talom.source.whatsapp.WhatsAppConversation
-import com.talom.ui.theme.TalomThemeMode
 import kotlinx.coroutines.delay
 
 private object SettingsRoutes {
@@ -45,6 +44,8 @@ private object SettingsRoutes {
     const val WHATSAPP = "settings/whatsapp"
     const val MANAGE = "settings/manage"
     const val CLASSROOM = "settings/classroom"
+    const val UPDATE = "settings/update"
+    const val ABOUT = "settings/about"
 }
 
 @Composable
@@ -114,8 +115,12 @@ fun SettingsNavGraph(
     onSyncClassroom: () -> Unit,
 
     // Theme + notifications + preferences
-    themeMode: TalomThemeMode,
-    onThemeChange: (TalomThemeMode) -> Unit,
+    followSystemTheme: Boolean,
+    onFollowSystemThemeChange: (Boolean) -> Unit,
+    dynamicColorsEnabled: Boolean,
+    onDynamicColorsChange: (Boolean) -> Unit,
+    isUnlocked: Boolean,
+    onUnlockToggle: (Boolean) -> Unit,
     fontPreference: String,
     onFontPreferenceChange: (String) -> Unit,
     pullHour: Int,
@@ -169,8 +174,12 @@ fun SettingsNavGraph(
         ) {
             composable(SettingsRoutes.HUB) {
                 SettingsHubScreen(
-                    themeMode = themeMode,
-                    onThemeChange = onThemeChange,
+                    followSystemTheme = followSystemTheme,
+                    onFollowSystemThemeChange = onFollowSystemThemeChange,
+                    dynamicColorsEnabled = dynamicColorsEnabled,
+                    onDynamicColorsChange = onDynamicColorsChange,
+                    isUnlocked = isUnlocked,
+                    onUnlockToggle = onUnlockToggle,
                     aiMode = aiMode,
                     providerId = if (aiMode == AiMode.CLOUD && useOpenAiCompatible) "openai_compatible" else if (aiMode == AiMode.CLOUD) "gemini" else null,
                     whitelist = whitelist,
@@ -181,6 +190,8 @@ fun SettingsNavGraph(
                     onNavigateAi = { navController.navigate(SettingsRoutes.AI) },
                     onNavigateWhatsApp = { navController.navigate(SettingsRoutes.WHATSAPP) },
                     onNavigateClassroom = { navController.navigate(SettingsRoutes.CLASSROOM) },
+                    onNavigateUpdate = { navController.navigate(SettingsRoutes.UPDATE) },
+                    onNavigateAbout = { navController.navigate(SettingsRoutes.ABOUT) },
                 )
             }
             composable(SettingsRoutes.CUSTOMIZE) {
@@ -274,6 +285,12 @@ fun SettingsNavGraph(
                     onSyncClassroom = onSyncClassroom,
                     onBack = { navController.popBackStack() },
                 )
+            }
+            composable(SettingsRoutes.UPDATE) {
+                UpdateSettingsScreen(onBack = { navController.popBackStack() })
+            }
+            composable(SettingsRoutes.ABOUT) {
+                AboutSettingsScreen(onBack = { navController.popBackStack() })
             }
         }
 

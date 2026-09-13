@@ -13,8 +13,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.talom.core.TalomPreferences
 import com.talom.ui.components.SectionHeader
-import com.talom.ui.components.SegmentedControl
 import com.talom.ui.components.SettingsGroup
+import com.talom.ui.components.ToggleRow
 import com.talom.ui.components.SettingsSubpageScaffold
 
 @Composable
@@ -28,16 +28,20 @@ fun CustomizeSettingsScreen(
     SettingsSubpageScaffold(title = "Customize", onBack = onBack) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             SectionHeader("Font")
-            SegmentedControl(
-                options = listOf("App default", "System"),
-                selectedIndex = if (fontPreference == TalomPreferences.FONT_SYSTEM_DEFAULT) 1 else 0,
-                onSelect = {
-                    onFontPreferenceChange(
-                        if (it == 1) TalomPreferences.FONT_SYSTEM_DEFAULT
-                        else TalomPreferences.FONT_APP_DEFAULT,
-                    )
-                },
-            )
+            SettingsGroup {
+                ToggleRow(
+                    label = "Follow System",
+                    caption = if (fontPreference == TalomPreferences.FONT_SYSTEM_DEFAULT)
+                        "Uses the system font" else "Uses the app's enforced typography",
+                    checked = fontPreference == TalomPreferences.FONT_SYSTEM_DEFAULT,
+                    onCheckedChange = {
+                        onFontPreferenceChange(
+                            if (it) TalomPreferences.FONT_SYSTEM_DEFAULT
+                            else TalomPreferences.FONT_APP_DEFAULT,
+                        )
+                    },
+                )
+            }
         }
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             SectionHeader("Identity")

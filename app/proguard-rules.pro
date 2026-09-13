@@ -1,0 +1,2 @@
+-keep class com.talom.data.** { *; }
+-keep class com.talom.BuildConfig { *; }

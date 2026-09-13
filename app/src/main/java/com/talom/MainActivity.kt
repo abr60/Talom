@@ -84,7 +84,6 @@ import com.talom.ui.settings.SettingsHubScreen
 import com.talom.ui.settings.SettingsNavGraph
 import com.talom.ui.settings.WhatsAppSettingsScreen
 import com.talom.ui.theme.TalomTheme
-import com.talom.ui.theme.TalomThemeMode
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -192,19 +191,10 @@ private fun TalomApp(
     var pulling by remember { mutableStateOf(false) }
     var importState by remember { mutableStateOf("No export imported.") }
     val context = LocalContext.current
-    var themeMode by remember {
-        mutableStateOf(
-            runCatching {
-                TalomThemeMode.valueOf(
-                    context.getSharedPreferences("talom_preferences", android.content.Context.MODE_PRIVATE)
-                        .getString("theme_mode", TalomThemeMode.SYSTEM.name)
-                        ?: TalomThemeMode.SYSTEM.name,
-                )
-            }.getOrDefault(TalomThemeMode.SYSTEM),
-        )
-    }
     val aiPreferences = remember { AiPreferences(context) }
     val talomPreferences = remember { com.talom.core.TalomPreferences(context) }
+    var followSystemTheme by remember { mutableStateOf(talomPreferences.isFollowSystemTheme()) }
+    var dynamicColors by remember { mutableStateOf(talomPreferences.isDynamicColorsEnabled()) }
     val initialAiConfig = remember { aiPreferences.config() }
     var aiMode by remember { mutableStateOf(initialAiConfig.mode) }
     var aiKey by remember { mutableStateOf("") }
@@ -484,7 +474,7 @@ private fun TalomApp(
                 Manifest.permission.POST_NOTIFICATIONS,
             ) != android.content.pm.PackageManager.PERMISSION_GRANTED
 
-    TalomTheme(themeMode = themeMode) {
+    TalomTheme(followSystemTheme = followSystemTheme, dynamicColors = dynamicColors) {
         Scaffold(
             bottomBar = {
                 NavigationBar(
@@ -884,12 +874,18 @@ private fun TalomApp(
                                         classroomSyncing = false
                                     }
                                 },
-                                themeMode = themeMode,
-                                onThemeChange = {
-                                    themeMode = it
-                                    context.getSharedPreferences("talom_preferences", android.content.Context.MODE_PRIVATE)
-                                        .edit().putString("theme_mode", it.name).apply()
+                                followSystemTheme = followSystemTheme,
+                                onFollowSystemThemeChange = {
+                                    followSystemTheme = it
+                                    talomPreferences.setFollowSystemTheme(it)
                                 },
+                                dynamicColorsEnabled = dynamicColors,
+                                onDynamicColorsChange = {
+                                    dynamicColors = it
+                                    talomPreferences.setDynamicColorsEnabled(it)
+                                },
+                                isUnlocked = talomPreferences.isUnlocked(),
+                                onUnlockToggle = { v -> talomPreferences.setUnlocked(v) },
                                 fontPreference = fontPreference,
                                 onFontPreferenceChange = {
                                     fontPreference = it

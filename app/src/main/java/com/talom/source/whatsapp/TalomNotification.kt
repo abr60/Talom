@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.talom.R
@@ -13,16 +14,18 @@ object TalomNotification {
     private const val CHANNEL_ID = "talom_pull_updates"
 
     fun ensureChannel(context: Context) {
-        val manager = context.getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(
-            NotificationChannel(
-                CHANNEL_ID,
-                "Talom updates",
-                NotificationManager.IMPORTANCE_LOW,
-            ).apply {
-                description = "New items found by scheduled Talom pulls"
-            },
-        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = context.getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    CHANNEL_ID,
+                    "Talom updates",
+                    NotificationManager.IMPORTANCE_LOW,
+                ).apply {
+                    description = "New items found by scheduled Talom pulls"
+                },
+            )
+        }
     }
 
     fun notifyPullResults(context: Context, academicCount: Int, insightCount: Int) {
